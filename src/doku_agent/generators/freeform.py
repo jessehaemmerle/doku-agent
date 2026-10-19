@@ -84,7 +84,9 @@ def _decide(ctx: Context, instruction: str, material: str) -> dict:
     valid_ids = {p.id for p in candidates}
     if decision.get("aktion") == "ergaenzen" and decision.get("seiten_id") not in valid_ids:
         decision["aktion"] = "neu"
-    decision["tags"] = [slugify(t) for t in (decision.get("tags") or [])[:5] if t.strip()]
+    # Nur Tags übernehmen, die im Wiki schon verwendet werden – keine neuen Schlagworte erfinden.
+    known = {t for p in conv.pages for t in p.tags}
+    decision["tags"] = [t for t in (slugify(t) for t in (decision.get("tags") or []) if t.strip()) if t in known][:5]
     return decision
 
 
@@ -118,7 +120,7 @@ def run_freeform(ctx: Context, instruction: str, files: list[Path] | None = None
         )
         draft = PageDraft(doc_type="freeform", title=page.title, description=page.description, blocks=[],
                           target_page_id=page.id, ops=result.get("operationen", []),
-                          extra_tags=decision.get("tags") or [], source="freeform", hints=hints)
+                          source="freeform", hints=hints)
         if not draft.ops:
             ctx.log.info("LLM sieht keine neuen Informationen für /%s", page.path)
             return None

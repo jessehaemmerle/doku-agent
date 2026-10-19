@@ -305,7 +305,7 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int) 
                       "lookup": {"manufacturer_id": "$mfr", "slug": tslug},
                       "data": {"manufacturer": "$mfr", "model": model, "slug": tslug}, "note": f"Gerätetyp '{model}'"})
         if not asset.model:
-            hints.append("Modell unbekannt (nur Wazuh liefert keine Herstellerdaten) – bitte Gerätetyp prüfen.")
+            hints.append("Modell unbekannt (Wazuh liefert keine Herstellerdaten) – bitte Gerätetyp prüfen.")
         steps.append({"ref": "dev", "action": "create", "endpoint": "dcim/devices",
                       "data": {**common, "device_type": "$dtype"}, "note": f"Gerät '{asset.name}'"})
         if_endpoint, if_parent, obj_type = "dcim/interfaces", "device", "dcim.interface"
@@ -355,7 +355,8 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int) 
 def plan_summary(asset: Asset, vm: bool, steps: list[dict], match_hint: str = "") -> str:
     rows = [[asset.name, "VM" if vm else "Gerät", asset.serial, f"{asset.manufacturer} {asset.model}".strip(),
              f"{asset.os_name} {asset.os_version}".strip(), ", ".join(sorted(asset.sources))]]
-    text = markdown.table(["Name", "Art", "Seriennummer", "Hersteller/Modell", "Betriebssystem", "Quellen"], rows)
+    text = f"{'VM' if vm else 'Gerät'} {asset.name} aus {', '.join(sorted(asset.sources))}, {len(steps)} Schritte\n\n"
+    text += markdown.table(["Name", "Art", "Seriennummer", "Hersteller/Modell", "Betriebssystem", "Quellen"], rows)
     text += "\n\n" + "\n".join(f"{i}. {s.get('note', s['endpoint'])} ({s['action']})" for i, s in enumerate(steps, 1))
     return text + (f"\n\n{match_hint}" if match_hint else "")
 

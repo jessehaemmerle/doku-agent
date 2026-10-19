@@ -202,6 +202,9 @@ def _config_page(ctx: Context, raw: str, name: str, title: str, source: str, wha
         for section in conf:
             label = section.tag + (f" [{label_suffix}]" if label_suffix else "")
             blocks_by_section.setdefault(label, []).extend(_flatten_xml(section) or [(section.tag, (section.text or "").strip())])
+    if not blocks_by_section:
+        ctx.log.info("%s: keine Einstellungen (leere Konfiguration) – übersprungen", title)
+        return None
     masked_xml = "\n".join(ET.tostring(c, encoding="unicode") for c in root)
     summary = cached(ctx, f"wazuh-config:{name}:" + digest(masked_xml), lambda: ctx.llm.text(
         "Du bist Wazuh-Experte. " + STYLE_RULES,
@@ -233,8 +236,6 @@ def document_config(ctx: Context) -> list[int | None]:
                 raw = ctx.wazuh.group_agent_conf(gname)
             except Exception as exc:
                 ctx.log.warning("Gruppe %s: agent.conf nicht lesbar (%s)", gname, exc)
-                continue
-            if not raw.strip() or raw.strip() == "<agent_config></agent_config>":
                 continue
             results.append(_config_page(ctx, raw, f"gruppe-{gname}", f"Wazuh-Gruppe {gname}: agent.conf",
                                         f"wazuh:config:group:{gname}", f"Gruppen-Konfiguration (agent.conf) von '{gname}'"))

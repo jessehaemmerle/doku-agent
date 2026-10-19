@@ -82,3 +82,24 @@ def test_vm_plan_against_real_netbox(nb):
     vm = client.get("virtualization/virtual-machines", refs["dev"][1])
     assert vm["vcpus"] == 4 and vm["memory"] == 8192 and vm["role"]["slug"] == "server"
     assert client.list("virtualization/interfaces", virtual_machine_id=vm["id"])[0]["name"] == "Ethernet0"
+
+
+def test_rollback_on_real_validation_error(nb):
+    client, cfg, site, created = nb
+    name = f"rb-{uuid.uuid4().hex[:6]}"
+    role = client.list("dcim/device-roles", slug="server") or [client.create(
+        "dcim/device-roles", {"name": "Server", "slug": "server", "color": "9e9e9e"})]
+    mfr = client.list("dcim/manufacturers", slug="it-test") or [client.create(
+        "dcim/manufacturers", {"name": "IT-Test", "slug": "it-test"})]
+    dtype = client.list("dcim/device-types", slug="it-box") or [client.create(
+        "dcim/device-types", {"manufacturer": mfr[0]["id"], "model": "IT-Box", "slug": "it-box"})]
+    steps = [
+        {"ref": "dev", "action": "create", "endpoint": "dcim/devices",
+         "data": {"name": name, "site": site["id"], "role": role[0]["id"], "device_type": dtype[0]["id"]}},
+        {"ref": "if0", "action": "create", "endpoint": "dcim/interfaces",
+         "data": {"device": "$dev", "name": "eth0", "type": "other"}},
+        {"action": "create", "endpoint": "ipam/ip-addresses", "data": {"address": "999.1.1.1/24"}},
+    ]
+    with pytest.raises(Exception, match="Rollback"):
+        execute_plan(client, steps, log)
+    assert client.list("dcim/devices", name=name) == []

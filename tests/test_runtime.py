@@ -76,17 +76,18 @@ def test_freeform_creates_new_page_following_conventions(ctx, fake_wiki, tmp_pat
     for i in range(2):
         fake_wiki.add(f"infrastruktur/backup/job-{i}", f"Job {i}", "## Zweck\n\nx\n\n## Wiederherstellung\n\ny\n",
                       ["backup"])
+    fake_wiki.add("handbuch/veeam", "Veeam", "x", ["veeam"])
     notes = tmp_path / "notizen.txt"
     notes.write_text("Ziel: NAS02\nAufbewahrung: 14 Tage", encoding="utf-8")
     ctx.__dict__["llm"] = FakeLLM(json_answers=[
         {"titel": "Fileserver Backup", "beschreibung": "Veeam-Job FS-Daily", "aktion": "neu", "seiten_id": 0,
-         "bereich": "infrastruktur/backup", "tags": ["Veeam"]},
+         "bereich": "infrastruktur/backup", "tags": ["Veeam", "Erfundenes-Schlagwort"]},
         {"inhalt": "## Zweck\n\nSichert die Fileserver täglich um 22:00."},
     ])
     pid = run_freeform(ctx, "Dokumentiere das Fileserver-Backup", [notes])
     prop = ctx.store.get_proposal(pid)
     assert prop.payload["path"] == "infrastruktur/backup/fileserver-backup"
-    assert set(prop.payload["tags"]) == {"backup", "veeam"}
+    assert set(prop.payload["tags"]) == {"backup", "veeam"}  # nur im Wiki bekannte Tags
     assert "## Wiederherstellung" in prop.payload["content"]  # gelernter Pflichtabschnitt ergänzt
     assert "NAS02" in ctx.llm.calls[0][1]  # Dateiinhalt ging in den Prompt
 
@@ -95,7 +96,7 @@ def test_freeform_extends_existing_page(ctx, fake_wiki):
     page_id = fake_wiki.add("infrastruktur/backup/fileserver", "Fileserver Backup", "## Zweck\n\nTäglich.\n", ["backup"])
     ctx.__dict__["llm"] = FakeLLM(json_answers=[
         {"titel": "Fileserver Backup", "beschreibung": "", "aktion": "ergaenzen", "seiten_id": page_id,
-         "bereich": "infrastruktur/backup", "tags": []},
+         "bereich": "infrastruktur/backup", "tags": ["backup", "neu"]},
         {"operationen": [{"op": "add_section", "heading": "Aufbewahrung", "after": "Zweck", "content": "14 Tage."}]},
     ])
     pid = run_freeform(ctx, "Fileserver Backup: Aufbewahrung 14 Tage")
@@ -103,6 +104,7 @@ def test_freeform_extends_existing_page(ctx, fake_wiki):
     assert prop.payload["action"] == "update" and prop.payload["page_id"] == page_id
     assert prop.payload["content"].startswith("## Zweck\n\nTäglich.")
     assert "## Aufbewahrung\n\n14 Tage." in prop.payload["content"]
+    assert prop.payload["tags"] == ["backup"]  # beim Ergänzen keine neuen Tags
 
 
 def test_freeform_rejects_hallucinated_page_id(ctx, fake_wiki):

@@ -86,13 +86,15 @@ class WazuhClient:
     # --- Agents, Inventar, SCA -------------------------------------------
 
     def agents(self, status: str | None = None) -> list[dict]:
-        params = {"select": "id,name,ip,registerIP,status,os,version,group,lastKeepAlive"}
+        # "os" allein ist kein gültiges select-Feld, nur die Unterfelder (geprüft gegen Wazuh 4.14).
+        params = {"select": "id,name,ip,registerIP,status,os.name,os.platform,os.version,version,group,lastKeepAlive"}
         if status:
             params["status"] = status
         return self.items("/agents", params)
 
     def _first(self, path: str) -> dict:
-        items = self.items(path)
+        # hardware/os liefern genau einen Eintrag und erlauben kein offset/limit (Wazuh 4.14).
+        items = self._get(path)["data"].get("affected_items", [])
         return items[0] if items else {}
 
     def hardware(self, agent_id: str) -> dict:

@@ -28,10 +28,15 @@ class AreaProfile:
     description_ratio: float = 0.0
     examples: list[str] = field(default_factory=list)  # Pfade
     example_outline: str = ""
+    # True, wenn der Zielordner leer ist und nur die Pfad-Schreibweise eines übergeordneten Bereichs gilt
+    inherited: bool = False
 
     def summary(self) -> str:
         if not self.page_count:
             return f"Bereich '{self.prefix or '/'}' ist noch leer – keine Konventionen ableitbar."
+        if self.inherited:
+            return (f"Zielordner noch leer; Pfad-Schreibweise ({self.slug_style}) aus /{self.prefix} übernommen, "
+                    "Tags und Abschnitte dort sind themenfremd und gelten nicht.")
         lines = [
             f"Bereich: /{self.prefix} ({self.page_count} Seiten)",
             f"Übliche Tags: {', '.join(self.common_tags) or 'keine'}",
@@ -148,7 +153,17 @@ class Conventions:
             prof.required_sections = sorted(required, key=lambda h: sum(positions[h]) / len(positions[h]))
 
     def profile_for_path(self, target_path: str) -> AreaProfile:
-        return self.profile(self.area_for(target_path))
+        """Profil für eine Zielseite. Tags und Pflichtabschnitte kommen nur aus demselben Ordner;
+        ist der Ordner leer, wird vom nächsthöheren Bereich nur die Pfad-Schreibweise übernommen."""
+        target = normalize_path(target_path)
+        parent = _parent(target)
+        if any(_parent(p.path) == parent and p.path != target for p in self.pages):
+            return self.profile(parent)
+        ancestor = self.area_for(target)
+        base = self.profile(ancestor)
+        if not base.page_count:
+            return base
+        return AreaProfile(prefix=ancestor, page_count=base.page_count, slug_style=base.slug_style, inherited=True)
 
     def areas(self, depth: int = 2) -> list[tuple[str, int, list[str]]]:
         """Bereiche bis zur angegebenen Tiefe mit Seitenanzahl und Beispieltiteln."""

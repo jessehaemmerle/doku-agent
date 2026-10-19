@@ -41,3 +41,12 @@ def test_slugify_styles():
     assert slugify("Mein Server", "snake") == "mein_server"
     assert detect_slug_style(["a_b", "c_d", "e-f"]) == "snake"
     assert detect_slug_style(["MyPage", "OtherPage"]) == "mixed"
+
+
+def test_empty_target_folder_does_not_inherit_foreign_tags(ctx, fake_wiki):
+    _seed(fake_wiki)
+    fake_wiki.add("infrastruktur/backup/exchange", "Exchange", "## Ablauf\n", ["veeam"])
+    prof = ctx.conventions.profile_for_path("infrastruktur/geraete/srv-neu")
+    assert prof.inherited and prof.prefix == "infrastruktur"
+    assert prof.common_tags == [] and prof.required_sections == []
+    assert "themenfremd" in prof.summary()

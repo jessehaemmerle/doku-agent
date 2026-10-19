@@ -201,7 +201,16 @@ nur Erklärungen, Beschreibungen und freie Texte. So bleiben Fakten korrekt, auc
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest                      # Unit- und Komponententests (Fakes für Wiki.js, Netbox, LLM)
-DOKU_IT_WIKI_URL=http://127.0.0.1:3000 DOKU_IT_WIKI_KEY=… .venv/bin/pytest tests/test_integration_wikijs.py
+```
+
+Integrationstests gegen echte Test-Instanzen (werden ohne Variablen übersprungen; nie gegen Produktion laufen lassen,
+sie legen Testseiten bzw. Testobjekte an):
+
+```bash
+DOKU_IT_WIKI_URL=http://127.0.0.1:3000 DOKU_IT_WIKI_KEY=… \
+DOKU_IT_NETBOX_URL=http://127.0.0.1:8000 DOKU_IT_NETBOX_TOKEN=nbt_… \
+DOKU_IT_WAZUH_URL=https://127.0.0.1:55000 DOKU_IT_WAZUH_USER=… DOKU_IT_WAZUH_PASSWORD=… DOKU_IT_WAZUH_INSECURE=1 \
+.venv/bin/pytest tests/test_integration_*.py
 ```
 
 Aufbau und Entscheidungen: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).

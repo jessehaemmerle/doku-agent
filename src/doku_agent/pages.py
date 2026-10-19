@@ -106,7 +106,9 @@ def propose_page(ctx: Context, draft: PageDraft) -> int | None:
         return None
     tags =list(dict.fromkeys([*ctx.cfg.wiki.tags.get(draft.doc_type, []), *profile.common_tags, *draft.extra_tags]))
     hints = [*draft.hints, *hints]
-    if profile.page_count:
+    if profile.inherited:
+        hints.append(profile.summary())
+    elif profile.page_count:
         hints.append("Konventionen aus /" + profile.prefix + " übernommen: "
                      + (", ".join(f"Tag '{t}'" for t in profile.common_tags) or "keine gemeinsamen Tags")
                      + (f"; Pflichtabschnitte: {', '.join(profile.required_sections)}"

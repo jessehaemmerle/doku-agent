@@ -114,7 +114,7 @@ def cmd_conventions(args) -> int:
         print(conv.profile(args.area.strip("/")).summary())
         return 0
     for prefix, n, titles in conv.areas(depth=3):
-        print(f"/{prefix:<45} {n:>4} Seiten  z.B. {', '.join(t for t in titles if t)}")
+        print(f"/{prefix:<45} {n:>4} {'Seite ' if n == 1 else 'Seiten'}  z.B. {', '.join(t for t in titles if t)}")
     return 0
 
 
