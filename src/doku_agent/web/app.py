@@ -62,10 +62,9 @@ def _apply_wiki_edits(ctx: Context, pid: int, payload: dict, title, path, tags, 
             changed = True
     if changed:
         payload["edited"] = True
-        update = {"payload": payload}
-        if payload["action"] == "create":
-            update["diff"] = markdown.unified_diff("", payload["content"], payload["path"])
-        ctx.store.update_proposal(pid, **update)
+        current = "" if payload["action"] == "create" else ctx.wiki.get_page(int(payload["page_id"])).content
+        diff = markdown.unified_diff(current, payload["content"], payload["path"])
+        ctx.store.update_proposal(pid, payload=payload, diff=diff)
 
 
 def create_app(ctx: Context) -> FastAPI:

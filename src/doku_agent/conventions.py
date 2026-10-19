@@ -92,7 +92,7 @@ class Conventions:
         self.wiki = wiki
         self.sample_pages = sample_pages
         self._pages: list[PageInfo] | None = None
-        self._profiles: dict[str, AreaProfile] = {}
+        self._profiles: dict[tuple[str, bool], AreaProfile] = {}
 
     @property
     def pages(self) -> list[PageInfo]:
@@ -111,12 +111,15 @@ class Conventions:
             parts.pop()
         return ""
 
-    def profile(self, prefix: str) -> AreaProfile:
-        if prefix in self._profiles:
-            return self._profiles[prefix]
+    def profile(self, prefix: str, direct_only: bool = False) -> AreaProfile:
+        """Profil eines Bereichs. direct_only: nur Seiten genau in diesem Ordner (für Zielseiten);
+        sonst bei weniger als zwei direkten Seiten alle Seiten darunter (Übersicht in der UI)."""
+        key = (prefix, direct_only)
+        if key in self._profiles:
+            return self._profiles[key]
         under = [p for p in self.pages if not prefix or p.path.startswith(prefix + "/")]
         direct = [p for p in under if _parent(p.path) == prefix]
-        pages = direct if len(direct) >= 2 else under
+        pages = direct if direct_only or len(direct) >= 2 else under
         prof = AreaProfile(prefix=prefix, page_count=len(pages))
         if pages:
             tag_counts = Counter(t for p in pages for t in set(p.tags))
@@ -126,7 +129,7 @@ class Conventions:
             sample = sorted(pages, key=lambda p: p.updated_at, reverse=True)[: self.sample_pages]
             prof.examples = [p.path for p in sample]
             self._learn_structure(prof, sample)
-        self._profiles[prefix] = prof
+        self._profiles[key] = prof
         return prof
 
     def _learn_structure(self, prof: AreaProfile, sample: list[PageInfo]) -> None:
@@ -158,7 +161,7 @@ class Conventions:
         target = normalize_path(target_path)
         parent = _parent(target)
         if any(_parent(p.path) == parent and p.path != target for p in self.pages):
-            return self.profile(parent)
+            return self.profile(parent, direct_only=True)
         ancestor = self.area_for(target)
         base = self.profile(ancestor)
         if not base.page_count:

@@ -102,8 +102,9 @@ def run_job(base: Context, job_id: int, name: str, params: dict) -> bool:
         base.store.append_job_log(job_id, f"Unbekannter Job: {name}")
         base.store.finish_job(job_id, False)
         return False
-    job_log = logging.getLogger(f"doku_agent.job.{job_id}")
-    job_log.setLevel(logging.INFO)
+    # Eigenständiger Logger statt getLogger(): getLogger würde pro Job einen Eintrag behalten.
+    job_log = logging.Logger(f"doku_agent.job.{job_id}", logging.INFO)
+    job_log.parent = logging.getLogger("doku_agent")
     handler = _JobLogHandler(base, job_id)
     job_log.addHandler(handler)
     ctx = base.with_log(job_log)

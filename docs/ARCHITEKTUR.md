@@ -70,6 +70,11 @@ Im Test gefundene und behobene Fehler: endlose Generierung ohne `num_predict`; W
 `syscollector/*/hardware|os` ab; Konventionen eines Nachbarordners wurden auf leere Zielordner übertragen; LLM erfand
 neue Tags. Für jeden Fall gibt es einen Test.
 
+Ein anschließendes Code-Review fand zehn weitere Schwachstellen, alle behoben und in
+`tests/test_review_regressions.py` abgesichert: u.a. Inhaltsverlust, wenn eine Seite zwischen Vorschlag und Freigabe
+angelegt wird; abgeschnittene JSON-Antworten am Tokenlimit; HTTP-Clients pro Job; Code-Fences in Rohnotizen;
+Überschreiben von Hand bearbeiteter Vorschläge durch nächtliche Läufe.
+
 ## Bewusst nicht umgesetzt
 
 - Drift-Erkennung für bereits bekannte Netbox-Objekte.

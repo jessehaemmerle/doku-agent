@@ -34,7 +34,8 @@ class LLM:
             "als 'unbekannt'."
         )
 
-    def _chat(self, system: str, user: str, fmt: dict | str | None) -> str:
+    def _chat(self, system: str, user: str, fmt: dict | str | None, max_tokens: int | None = None) -> tuple[str, bool]:
+        """Rückgabe: (Antworttext, abgeschnitten wegen Tokenlimit)."""
         body = {
             "model": self.cfg.model,
             "messages": [
@@ -45,7 +46,7 @@ class LLM:
             "think": False,
             "keep_alive": self.cfg.keep_alive,
             "options": {"num_ctx": self.cfg.num_ctx, "temperature": self.cfg.temperature,
-                        "num_predict": self.cfg.max_output_tokens},
+                        "num_predict": max_tokens or self.cfg.max_output_tokens},
         }
         if fmt is not None:
             body["format"] = fmt
@@ -55,21 +56,30 @@ class LLM:
             raise LLMError(f"Ollama nicht erreichbar: {exc}") from exc
         if resp.status_code != 200:
             raise LLMError(f"Ollama-Fehler {resp.status_code}: {resp.text[:500]}")
-        content = resp.json().get("message", {}).get("content", "")
-        return _THINK.sub("", content).strip()
+        data = resp.json()
+        content = data.get("message", {}).get("content", "")
+        return _THINK.sub("", content).strip(), data.get("done_reason") == "length"
 
     def text(self, system: str, user: str) -> str:
-        return self._chat(system, user, None)
+        content, truncated = self._chat(system, user, None)
+        if truncated:
+            log.warning("LLM-Antwort am Tokenlimit abgeschnitten")
+            content += "\n\n_(Text am Längenlimit des Modells abgeschnitten.)_"
+        return content
 
     def json(self, system: str, user: str, schema: dict) -> dict:
-        """Antwort als JSON gemäß Schema (Ollama Structured Outputs), ein Wiederholungsversuch."""
+        """Antwort als JSON gemäß Schema (Ollama Structured Outputs), ein Wiederholungsversuch.
+        War die erste Antwort am Tokenlimit abgeschnitten, bekommt der zweite Versuch das doppelte Limit."""
         last_error = None
+        max_tokens = self.cfg.max_output_tokens
         for attempt in range(2):
             prompt = user if attempt == 0 else (
                 f"{user}\n\nDeine letzte Antwort war kein gültiges JSON ({last_error}). "
                 "Antworte ausschließlich mit gültigem JSON."
             )
-            raw = self._chat(system, prompt, schema)
+            raw, truncated = self._chat(system, prompt, schema, max_tokens)
+            if truncated:
+                max_tokens = min(max_tokens * 2, self.cfg.num_ctx)
             try:
                 data = json.loads(raw)
                 if isinstance(data, dict):

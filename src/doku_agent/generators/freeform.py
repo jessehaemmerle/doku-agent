@@ -30,6 +30,8 @@ CONTENT_SCHEMA = {
     "properties": {"inhalt": {"type": "string"}},
     "required": ["inhalt"],
 }
+RAW_NOTES_LIMIT = 30000  # Zeichen der Rohnotizen, die bei schwacher Modellantwort übernommen werden
+
 OPS_SCHEMA = {
     "type": "object",
     "properties": {"operationen": {"type": "array", "items": {
@@ -85,14 +87,16 @@ def _decide(ctx: Context, instruction: str, material: str) -> dict:
     if decision.get("aktion") == "ergaenzen" and decision.get("seiten_id") not in valid_ids:
         decision["aktion"] = "neu"
     # Nur Tags übernehmen, die im Wiki schon verwendet werden – keine neuen Schlagworte erfinden.
-    known = {t for p in conv.pages for t in p.tags}
-    decision["tags"] = [t for t in (slugify(t) for t in (decision.get("tags") or []) if t.strip()) if t in known][:5]
+    # Vergleich normalisiert, übernommen wird die Schreibweise aus dem Wiki.
+    known = {slugify(t): t for p in conv.pages for t in p.tags}
+    suggested = [slugify(t) for t in (decision.get("tags") or []) if t.strip()]
+    decision["tags"] = list(dict.fromkeys(known[t] for t in suggested if t in known))[:5]
     return decision
 
 
 def run_freeform(ctx: Context, instruction: str, files: list[Path] | None = None, target_path: str = "") -> int | None:
-    material, hints = gather_material(ctx, instruction, files or [])
-    material = ctx.llm.condense(material, instruction)
+    raw_material, hints = gather_material(ctx, instruction, files or [])
+    material = ctx.llm.condense(raw_material, instruction)
     conv = ctx.conventions
 
     target_page = conv.find_by_path(target_path) if target_path else None
@@ -144,7 +148,8 @@ def run_freeform(ctx: Context, instruction: str, files: list[Path] | None = None
     if len(content) < 200:
         # Kleines Modell hat kaum etwas geliefert: Notizen nicht verlieren, sondern roh übernehmen.
         hints.append("Das Sprachmodell hat kaum Inhalt erzeugt – die Eingaben wurden als Rohfassung übernommen.")
-        content = f"{content}\n\n## Notizen (Rohfassung)\n\n```text\n{material.strip()}\n```".strip()
+        raw = raw_material if len(raw_material) <= RAW_NOTES_LIMIT else raw_material[:RAW_NOTES_LIMIT] + "\n[... gekürzt ...]"
+        content = f"{content}\n\n## Notizen (Rohfassung)\n\n{markdown.code_block(raw.strip(), 'text')}".strip()
     return propose_page(ctx, PageDraft(
         doc_type="freeform", title=decision["titel"], description=decision.get("beschreibung", ""),
         blocks=[], intro=content, target_path=path, extra_tags=decision.get("tags") or [],

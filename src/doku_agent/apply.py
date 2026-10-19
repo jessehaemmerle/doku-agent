@@ -29,7 +29,11 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
     if payload["action"] == "create":
         existing = wiki.get_page_by_path(payload["path"])
         if existing is not None:
-            # Inzwischen angelegt: in eine Ergänzung umwandeln, erneut zur Prüfung vorlegen.
+            if payload.get("edited") or not payload.get("blocks"):
+                # Freier Text bzw. von Hand bearbeitet: nicht automatisch zusammenführbar.
+                raise ApplyError(f"Unter /{payload['path']} gibt es inzwischen eine Seite. Bitte Pfad im Vorschlag "
+                                 "ändern oder den Auftrag erneut ausführen, damit der Agent die Seite ergänzt.")
+            # Inzwischen angelegt: Agent-Blöcke einfügen und erneut zur Prüfung vorlegen.
             new, _ = merge_into(existing.content, _blocks(payload), payload.get("ops", []))
             payload.update(action="update", page_id=existing.id, base_hash=sha(existing.content),
                            tags=list(dict.fromkeys([*existing.tags, *payload["tags"]])))

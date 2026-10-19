@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-_FENCE = re.compile(r"^\s*(```|~~~)")
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
 def block_markers(block_id: str) -> tuple[str, str]:
@@ -27,12 +27,17 @@ class Section:
 
 
 def _heading_lines(lines: list[str]) -> list[tuple[int, int, str]]:
-    result, in_fence = [], False
+    result, fence = [], ""
     for idx, line in enumerate(lines):
-        if _FENCE.match(line):
-            in_fence = not in_fence
+        m = _FENCE.match(line)
+        if m:
+            marker = m.group(1)
+            if not fence:
+                fence = marker
+            elif marker[0] == fence[0] and len(marker) >= len(fence) and not line.strip()[len(marker):]:
+                fence = ""
             continue
-        if in_fence:
+        if fence:
             continue
         m = _HEADING.match(line)
         if m:
@@ -58,14 +63,14 @@ def headings(md: str, max_level: int = 3) -> list[tuple[int, str]]:
     return [(s.level, s.title) for s in sections(md) if s.level <= max_level]
 
 
-def _norm(title: str) -> str:
+def norm_heading(title: str) -> str:
     return re.sub(r"[^a-z0-9äöüß]+", " ", title.lower()).strip()
 
 
 def find_section(md: str, title: str) -> Section | None:
-    wanted = _norm(title)
+    wanted = norm_heading(title)
     for sec in sections(md):
-        if _norm(sec.title) == wanted:
+        if norm_heading(sec.title) == wanted:
             return sec
     return None
 
@@ -181,3 +186,10 @@ def outline(md: str, max_chars_per_section: int = 600) -> str:
             body = body[:max_chars_per_section] + " [...]"
         out.append(f"{'#' * sec.level} {sec.title}\n{body}")
     return "\n\n".join(out) if out else md[: max_chars_per_section * 3]
+
+
+def code_block(text: str, lang: str = "") -> str:
+    """Codeblock, dessen Fence länger ist als jede Backtick-Folge im Inhalt."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{lang}\n{text.rstrip()}\n{fence}"

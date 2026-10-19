@@ -62,14 +62,24 @@ def merge_into(content: str, blocks: list[Block], ops: list[dict]) -> tuple[str,
 
 
 def build_new_content(draft: PageDraft, profile: AreaProfile) -> str:
-    parts = [draft.intro.strip()] if draft.intro.strip() else []
-    for block in draft.blocks:
+    """Neue Seite: Einleitung, eigene Blöcke, dann die Pflichtabschnitte des Bereichs in gelernter
+    Reihenfolge (ein Block mit gleicher Überschrift steht an dessen Stelle)."""
+    def render(block: Block) -> str:
         begin, end = markdown.block_markers(block.id)
-        parts.append(f"## {block.heading}\n\n{begin}\n{block.content.strip()}\n{end}")
-    content = "\n\n".join(parts) + "\n"
-    if profile.required_sections:
-        content = markdown.ensure_sections(content, profile.required_sections)
-    return content
+        return f"## {block.heading}\n\n{begin}\n{block.content.strip()}\n{end}"
+
+    norm = markdown.norm_heading
+    required = {norm(t): t for t in profile.required_sections}
+    parts = [draft.intro.strip()] if draft.intro.strip() else []
+    parts += [render(b) for b in draft.blocks if norm(b.heading) not in required]
+    by_heading = {norm(b.heading): b for b in draft.blocks}
+    intro_has = {norm(t) for _, t in markdown.headings(draft.intro, max_level=2)}
+    for key, title in required.items():
+        if key in by_heading:
+            parts.append(render(by_heading[key]))
+        elif key not in intro_has:
+            parts.append(f"## {title}\n\n_Noch zu ergänzen._")
+    return "\n\n".join(parts) + "\n"
 
 
 def _resolve_target(ctx: Context, draft: PageDraft) -> tuple[str, Page | None, AreaProfile, list[str]]:

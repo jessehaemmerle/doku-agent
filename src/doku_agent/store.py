@@ -125,8 +125,10 @@ class Store:
         ts = now()
         with self._conn() as db:
             if dedup_key:
-                row = db.execute("SELECT id FROM proposals WHERE dedup_key=? AND status='pending'",
+                row = db.execute("SELECT id, payload FROM proposals WHERE dedup_key=? AND status='pending'",
                                  (dedup_key,)).fetchone()
+                if row and json.loads(row["payload"]).get("edited"):
+                    return row["id"]  # von Hand bearbeitet: Vorrang vor neu erzeugtem Inhalt
                 if row:
                     db.execute(
                         "UPDATE proposals SET title=?, summary=?, payload=?, diff=?, source=?, updated_at=? "
