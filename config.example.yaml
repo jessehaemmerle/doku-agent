@@ -1,0 +1,101 @@
+# doku-agent – Beispielkonfiguration. Kopieren nach config.yaml und anpassen.
+# Geheimnisse nie hier eintragen, sondern als ${VARIABLE} aus der .env-Datei referenzieren.
+
+general:
+  language: Deutsch            # Sprache der erzeugten Texte
+  data_dir: /data              # SQLite-Datenbank, Uploads (im Container: Volume agent-data)
+  timezone: Europe/Vienna      # für den Zeitplan
+
+llm:
+  base_url: http://ollama:11434
+  # 16 GB RAM, nur CPU: qwen3:8b (Q4, ca. 5 GB) ist der beste Kompromiss.
+  # Schneller, aber schwächer: qwen3:4b. Nach Wechsel: LLM_MODEL in .env anpassen und Modell neu laden.
+  model: qwen3:8b
+  num_ctx: 8192                # Kontextfenster; größer = mehr RAM und langsamer
+  temperature: 0.2
+  timeout_s: 1800              # CPU-Antworten können mehrere Minuten dauern
+  max_input_chars: 12000       # Eingabebudget pro Prompt; Längeres wird vorab zusammengefasst
+  max_output_tokens: 2048      # Antwortlimit; verhindert endloses Generieren
+
+wiki:
+  url: https://wiki.example.local
+  api_key: ${WIKI_API_KEY}
+  locale: de
+  verify_tls: true             # oder Pfad zur internen CA, z.B. /config/ca.pem
+  # Zielpfade je Doku-Typ. Existiert dort schon ein Bereich mit Seiten, übernimmt der Agent
+  # dessen Tags, Pflichtabschnitte und Pfad-Schreibweise (siehe Web-UI > Konventionen).
+  paths:
+    netbox_device: infrastruktur/geraete/{name}       # Platzhalter: {name} {site} {role}
+    wazuh_rules: security/wazuh/regeln/{name}
+    wazuh_decoders: security/wazuh/decoder/{name}
+    wazuh_config: security/wazuh/konfiguration/{name}
+    wazuh_sca: security/wazuh/sca/{name}
+    intune_policy: clients/intune/{category}/{name}   # {category}: compliance, konfigurationsprofile, settings-catalog
+    intune_apps: clients/intune/apps
+  tags:
+    netbox_device: [netbox]
+    wazuh_rules: [wazuh]
+    wazuh_decoders: [wazuh]
+    wazuh_config: [wazuh]
+    wazuh_sca: [wazuh, sca]
+    intune_policy: [intune]
+    intune_apps: [intune]
+  convention_sample_pages: 5
+
+netbox:
+  enabled: true
+  url: https://netbox.example.local
+  token: ${NETBOX_TOKEN}
+  verify_tls: true
+  site: hq                     # Slug des Standorts, dem neu erkannte Maschinen zugeordnet werden
+  status: active
+  roles:                       # erste passende Regel gewinnt (Regex auf Betriebssystem)
+    - os: "(?i)server|linux|ubuntu|debian|red ?hat|rhel|centos|rocky|alma|suse"
+      role: server
+    - os: ".*"
+      role: client
+  unknown_manufacturer: Unbekannt
+  unknown_model: Unbekannt
+  vm_cluster: null             # optional: Cluster-ID für erkannte VMs
+  assign_ips: true
+  set_primary_ip: true
+
+wazuh:
+  enabled: true
+  url: https://wazuh-manager.example.local:55000
+  username: ${WAZUH_USER}
+  password: ${WAZUH_PASSWORD}
+  verify_tls: true
+  rules_dir: etc/rules         # nur eigene Regeln, nicht das Standard-Ruleset
+  decoders_dir: etc/decoders
+  sca_agents: []               # leer = alle aktiven Agents; sonst Liste von IDs oder Namen
+  document_groups: true
+
+intune:
+  enabled: false
+  tenant_id: ${INTUNE_TENANT_ID}
+  client_id: ${INTUNE_CLIENT_ID}
+  client_secret: ${INTUNE_CLIENT_SECRET}
+  resolve_group_names: true    # braucht Group.Read.All
+  include: [compliance, configurations, settings_catalog, apps]
+  fetch_ethernet_mac: true
+  discovery_os: [Windows, macOS, Linux]   # leer = alle (auch iOS/Android)
+
+# Nächtliche Läufe. Ergebnisse landen als Vorschläge in der Freigabe-Liste.
+schedule:
+  - {job: discovery, at: "01:30"}
+  - {job: wazuh_rules, at: "02:00"}
+  - {job: wazuh_decoders, at: "02:30"}
+  - {job: wazuh_config, at: "03:00"}
+  - {job: wazuh_sca, at: "03:30", days: [0]}   # nur montags
+  # - {job: intune, at: "04:00"}
+
+web:
+  host: 0.0.0.0
+  port: 8080
+  username: admin
+  password: ${WEB_PASSWORD}
+
+egress:
+  extra_allowed_hosts: []      # nur nötig, wenn ein Dienst auf einen anderen Host umleitet
+  trust_env: false             # true = HTTP(S)_PROXY nutzen (z.B. Firmenproxy für Graph)

@@ -1,0 +1,9 @@
+{% for j in job_list %}
+<a href="/jobs/{{ j.id }}">
+  <span class="id">#{{ j.id }}</span>
+  <span class="title">{{ jobs[j.name][0] if j.name in jobs else j.name }}<span class="sub">{{ j.created_at[:16].replace('T', ' ') }}{% if j.finished_at %} – fertig {{ j.finished_at[11:16] }}{% endif %}</span></span>
+  <span class="status {{ j.status }}">{{ status_labels.get(j.status, j.status) }}</span>
+</a>
+{% else %}
+<p class="empty">Noch keine Jobs gelaufen.</p>
+{% endfor %}

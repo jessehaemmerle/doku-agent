@@ -1,0 +1,88 @@
+# doku-agent + lokales Sprachmodell (Ollama, CPU-only).
+#
+# Netzwerke:
+#   llm  – intern (internal: true): Ollama hat KEINEN Internetzugang und ist nur für den Agent erreichbar.
+#   lan  – Agent erreicht darüber Wiki.js, Netbox, Wazuh (und optional Microsoft Graph für Intune).
+#
+# Erstinstallation:  docker compose --profile setup run --rm ollama-pull
+# Start:             docker compose up -d
+name: doku-agent
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "5"}
+
+services:
+  agent:
+    build: .
+    image: doku-agent:0.1.0
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - agent-data:/data
+      # Interne CA für TLS-Prüfung (in config.yaml: verify_tls: /config/ca.pem)
+      # - ./ca.pem:/config/ca.pem:ro
+    ports:
+      # Nur lokal erreichbar. Für Zugriff aus dem LAN z.B. "10.0.0.5:8080:8080" (Basic-Auth ist immer aktiv).
+      - "127.0.0.1:8080:8080"
+    networks: [llm, lan]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+
+  ollama:
+    image: ollama/ollama:0.34.4
+    restart: unless-stopped
+    environment:
+      OLLAMA_NO_CLOUD: "1"          # Cloud-Modelle und Websuche von Ollama abschalten
+      OLLAMA_NUM_PARALLEL: "1"      # ein Request gleichzeitig (CPU)
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: "10m"
+      OLLAMA_CONTEXT_LENGTH: "8192"
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [llm]
+    # 16 GB Host: qwen3:8b (Q4) braucht ca. 6-7 GB inkl. 8k-Kontext.
+    mem_limit: 11g
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+  # Einmalig bzw. für Modell-Updates: lädt das Modell mit Internetzugang in das gemeinsame Volume.
+  ollama-pull:
+    image: ollama/ollama:0.34.4
+    profiles: [setup]
+    environment:
+      OLLAMA_NO_CLOUD: "1"
+      LLM_MODEL: ${LLM_MODEL:-qwen3:8b}
+    entrypoint: ["/bin/sh", "-c", "ollama serve >/tmp/serve.log 2>&1 & sleep 5 && ollama pull \"$$LLM_MODEL\""]
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [lan]
+    mem_limit: 11g
+
+networks:
+  llm:
+    internal: true
+  lan: {}
+
+volumes:
+  agent-data:
+  ollama-models:

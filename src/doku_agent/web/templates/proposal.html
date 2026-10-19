@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}#{{ p.id }} {{ p.title }}{% endblock %}
+{% block content %}
+<h1>{{ p.title }}</h1>
+<p class="lede">#{{ p.id }}, {{ p.summary.splitlines()[0] if p.summary else '' }}, Quelle {{ p.source or 'manuell' }}, <span class="status {{ p.status }}">{{ status_labels.get(p.status, p.status) }}</span></p>
+
+<div class="review">
+  <section aria-label="Änderung">
+    {% if p.kind == 'wiki_page' %}
+      <div class="sheet">
+        <h2>Änderung an /{{ p.payload.path }}</h2>
+        {% if diff %}<pre class="diff">{% for cls, line in diff %}<span class="{{ cls }}">{{ line }}</span>{% endfor %}</pre>
+        {% else %}<p class="muted">Kein Unterschied zur aktuellen Seite.</p>{% endif %}
+      </div>
+    {% else %}
+      <div class="sheet">
+        <h2>Geplante Netbox-Änderungen</h2>
+        <pre class="summary">{{ p.summary }}</pre>
+      </div>
+    {% endif %}
+    {% if p.result %}<h2>Ergebnis</h2><pre class="log">{{ p.result }}</pre>{% endif %}
+  </section>
+
+  <aside class="desk" aria-label="Entscheidung">
+    <h2>Entscheidung</h2>
+    {% if p.kind == 'wiki_page' %}
+    <dl class="facts">
+      <dt>Aktion</dt><dd>{{ 'Neue Seite' if p.payload.action == 'create' else 'Bestehende Seite ergänzen' }}</dd>
+      <dt>Titel</dt><dd>{{ p.payload.title }}</dd>
+      <dt>Pfad</dt><dd>/{{ p.payload.path }}</dd>
+      <dt>Tags</dt><dd>{{ p.payload.tags|join(', ') or '–' }}</dd>
+    </dl>
+    {% endif %}
+    {% if p.payload.hints %}
+      <ul class="hints">{% for h in p.payload.hints %}<li>{{ h }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if p.status == 'pending' %}
+      <form method="post" action="/vorschlaege/{{ p.id }}/freigeben">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        {% if p.kind == 'wiki_page' %}
+        <details>
+          <summary>Vor dem Übernehmen bearbeiten</summary>
+          <label for="title">Titel</label>
+          <input type="text" id="title" name="title" value="{{ p.payload.title }}">
+          {% if p.payload.action == 'create' %}
+          <label for="path">Pfad <span class="muted">ohne führenden Schrägstrich</span></label>
+          <input type="text" id="path" name="path" value="{{ p.payload.path }}">
+          {% endif %}
+          <label for="tags">Tags <span class="muted">kommagetrennt</span></label>
+          <input type="text" id="tags" name="tags" value="{{ p.payload.tags|join(', ') }}">
+          <label for="content">Inhalt (Markdown)</label>
+          <textarea id="content" name="content" rows="18">{{ p.payload.content }}</textarea>
+        </details>
+        {% else %}
+        <details>
+          <summary>Plan bearbeiten (JSON)</summary>
+          <label for="steps">Schritte <span class="muted">Referenzen wie "$dev" verweisen auf frühere Schritte</span></label>
+          <textarea id="steps" name="steps" rows="22">{{ steps_json }}</textarea>
+        </details>
+        {% endif %}
+        <div class="actions">
+          <button class="primary" type="submit">{{ 'Ins Wiki übernehmen' if p.kind == 'wiki_page' else 'In Netbox anlegen' }}</button>
+        </div>
+      </form>
+      <form method="post" action="/vorschlaege/{{ p.id }}/ablehnen">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="check"><input type="checkbox" name="ignore" value="1"> Nicht mehr vorschlagen</label>
+        <div class="actions"><button class="danger" type="submit">Ablehnen</button></div>
+      </form>
+    {% elif p.status in ('failed', 'rejected') %}
+      <form method="post" action="/vorschlaege/{{ p.id }}/wieder-oeffnen">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <div class="actions"><button type="submit">Wieder öffnen</button></div>
+      </form>
+    {% else %}
+      <p class="muted">Bereits übernommen.</p>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}

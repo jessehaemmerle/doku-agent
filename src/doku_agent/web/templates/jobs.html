@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Jobs{% endblock %}
+{% block content %}
+<h1>Jobs</h1>
+<p class="lede">Läufe werden nacheinander abgearbeitet, damit das Sprachmodell die CPU nicht doppelt belegt.</p>
+<form method="post" action="/jobs">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="grid-jobs">
+    {% for name in startable %}<button type="submit" name="name" value="{{ name }}">{{ jobs[name][0] }}</button>{% endfor %}
+  </div>
+</form>
+<h2>Verlauf</h2>
+<div class="list">{% include "_job_rows.html" %}</div>
+{% endblock %}

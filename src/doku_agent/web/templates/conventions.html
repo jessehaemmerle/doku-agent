@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Konventionen{% endblock %}
+{% block content %}
+<h1>Gelernte Konventionen</h1>
+<p class="lede">Es gibt keine geschriebenen Regeln, deshalb leitet der Agent sie aus den bestehenden Seiten eines Bereichs ab: übliche Tags, wiederkehrende Abschnitte und Pfad-Schreibweise. Wähle einen Bereich, um zu sehen, was er daraus übernimmt.</p>
+{% if error %}<p class="flash err">Wiki nicht lesbar: {{ error }}</p>{% endif %}
+
+{% if profile %}
+<div class="sheet">
+  <h2>/{{ profile.prefix }}</h2>
+  <table class="kv">
+    <tr><th>Seiten</th><td>{{ profile.page_count }}</td></tr>
+    <tr><th>Übliche Tags</th><td>{{ profile.common_tags|join(', ') or '–' }}</td></tr>
+    <tr><th>Pflichtabschnitte</th><td>{{ profile.required_sections|join(', ') or '– (zu wenig einheitlich)' }}</td></tr>
+    <tr><th>Pfad-Schreibweise</th><td>{{ profile.slug_style }}</td></tr>
+    <tr><th>Beschreibung gepflegt</th><td>{{ (profile.description_ratio * 100)|round|int }} % der Seiten</td></tr>
+    <tr><th>Vorbildseiten</th><td>{% for e in profile.examples %}<code>/{{ e }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+  </table>
+  {% if profile.example_outline %}<h3>Aufbau der neuesten Vorbildseite</h3><pre class="summary">{{ profile.example_outline }}</pre>{% endif %}
+</div>
+{% endif %}
+
+<h2>Bereiche</h2>
+<div class="list">
+  {% for prefix, n, titles in areas %}
+  <a href="/konventionen?bereich={{ prefix }}">
+    <span class="id">{{ n }}</span>
+    <span class="title">/{{ prefix }}<span class="sub">{{ titles|select|join(', ') }}</span></span>
+    <span></span>
+  </a>
+  {% else %}<p class="empty">Keine Bereiche gefunden.</p>{% endfor %}
+</div>
+
+<h2>Zielpfade je Doku-Typ</h2>
+<p class="muted">Aus <code>config.yaml</code> (<code>wiki.paths</code>). Existiert unter einem Pfad schon ein Bereich, übernimmt der Agent dessen Konventionen.</p>
+<table class="kv">{% for key, value in paths.items() %}<tr><th>{{ key }}</th><td><code>/{{ value }}</code></td></tr>{% endfor %}</table>
+{% endblock %}

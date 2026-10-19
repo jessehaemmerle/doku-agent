@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Neuer Auftrag{% endblock %}
+{% block content %}
+<h1>Etwas dokumentieren lassen</h1>
+<p class="lede">Beschreibe in Stichpunkten, was ins Wiki soll, und hänge Konfigurationen, Logs oder Unterlagen an. Der Agent sucht passende bestehende Seiten und ergänzt sie, statt Duplikate anzulegen.</p>
+<form method="post" action="/auftrag" enctype="multipart/form-data" class="sheet">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="instruction">Was soll dokumentiert werden?</label>
+  <textarea class="prose" id="instruction" name="instruction" required rows="8" placeholder="z.B. Backup der Fileserver: Veeam-Job FS-Daily, läuft 22:00, Ziel Repository NAS02, Aufbewahrung 14 Tage, Wiederherstellung über …"></textarea>
+  <label for="files">Dateien <span class="muted">Text, Konfigurationen, CSV/JSON/XML/YAML, PDF, DOCX – je bis 20 MB</span></label>
+  <input type="file" id="files" name="files" multiple>
+  <label for="target_path">Zielseite <span class="muted">optional, z.B. infrastruktur/backup – leer lassen, damit der Agent selbst einordnet</span></label>
+  <input type="text" id="target_path" name="target_path">
+  <div class="actions"><button class="primary" type="submit">Auftrag einplanen</button>
+    <span class="muted">Auf CPU dauert ein Auftrag einige Minuten.</span></div>
+</form>
+{% endblock %}

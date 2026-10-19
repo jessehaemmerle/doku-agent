@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block head %}{% if j.status in ('queued', 'running') %}<meta http-equiv="refresh" content="5">{% endif %}{% endblock %}
+{% block title %}Job #{{ j.id }}{% endblock %}
+{% block content %}
+<h1>{{ jobs[j.name][0] if j.name in jobs else j.name }}</h1>
+<p class="lede">Job #{{ j.id }} <span class="status {{ j.status }}">{{ status_labels.get(j.status, j.status) }}</span>
+  eingeplant {{ j.created_at[:16].replace('T', ' ') }}{% if j.finished_at %}, fertig {{ j.finished_at[:16].replace('T', ' ') }}{% endif %}.
+  {% if j.status in ('queued', 'running') %}Die Seite aktualisiert sich alle 5 Sekunden.{% endif %}</p>
+{% if j.params.instruction %}<h2>Auftrag</h2><pre class="summary">{{ j.params.instruction }}</pre>{% endif %}
+<h2>Protokoll</h2>
+<pre class="log">{{ j.log or 'Noch keine Ausgabe.' }}</pre>
+{% if j.status == 'done' %}<p><a href="/vorschlaege">Zu den Freigaben</a></p>{% endif %}
+{% endblock %}

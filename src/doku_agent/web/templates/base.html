@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% block head %}{% endblock %}
+  <title>{% block title %}doku-agent{% endblock %} – doku-agent</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+  <nav class="nav" aria-label="Hauptnavigation">
+    <p class="brand">doku-agent <span>lokal</span></p>
+    {% set here = request.url.path %}
+    <ul>
+      <li><a href="/" {% if here == '/' %}aria-current="page"{% endif %}>Übersicht</a></li>
+      <li><a href="/vorschlaege" {% if here.startswith('/vorschlaege') %}aria-current="page"{% endif %}>Freigaben
+        {% if pending %}<span class="count" aria-label="{{ pending }} offen">{{ pending }}</span>{% endif %}</a></li>
+      <li><a href="/auftrag" {% if here == '/auftrag' %}aria-current="page"{% endif %}>Neuer Auftrag</a></li>
+      <li><a href="/jobs" {% if here.startswith('/jobs') %}aria-current="page"{% endif %}>Jobs</a></li>
+      <li><a href="/konventionen" {% if here == '/konventionen' %}aria-current="page"{% endif %}>Konventionen</a></li>
+      <li><a href="/status" {% if here == '/status' %}aria-current="page"{% endif %}>Status</a></li>
+    </ul>
+  </nav>
+  <main>
+    {% if msg %}<p class="flash" role="status">{{ msg }}</p>{% endif %}
+    {% if err %}<p class="flash err" role="alert">{{ err }}</p>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

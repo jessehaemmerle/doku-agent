@@ -1,0 +1,9 @@
+{% for p in proposals %}
+<a href="/vorschlaege/{{ p.id }}">
+  <span class="id">#{{ p.id }}</span>
+  <span class="title">{{ p.title }}<span class="sub">{{ p.summary.splitlines()[0] if p.summary else '' }}, {{ p.source }}, {{ p.updated_at[:16].replace('T', ' ') }}</span></span>
+  <span class="status {{ p.status }}">{{ status_labels.get(p.status, p.status) }}</span>
+</a>
+{% else %}
+<p class="empty">{{ empty_text }}</p>
+{% endfor %}

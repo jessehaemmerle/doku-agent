@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Übersicht{% endblock %}
+{% block content %}
+<h1>{% if pending %}{{ pending }} Vorschl{{ 'ag wartet' if pending == 1 else 'äge warten' }} auf deine Freigabe{% else %}Alles freigegeben{% endif %}</h1>
+<p class="lede">Der Agent schreibt nichts ohne deine Zustimmung ins Wiki oder nach Netbox. Neue Vorschläge entstehen durch die nächtlichen Läufe, durch Aufträge oder wenn du unten einen Lauf startest.</p>
+
+<div class="list">
+  {% set empty_text = "Keine offenen Vorschläge." %}
+  {% include "_proposal_rows.html" %}
+</div>
+{% if pending > proposals|length %}<p><a href="/vorschlaege">Alle {{ pending }} offenen Vorschläge ansehen</a></p>{% endif %}
+
+<h2>Lauf jetzt starten</h2>
+<form method="post" action="/jobs">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="grid-jobs">
+    {% for name in startable %}<button type="submit" name="name" value="{{ name }}">{{ jobs[name][0] }}</button>{% endfor %}
+  </div>
+</form>
+{% if schedule %}
+<p class="muted">Zeitplan: {% for e in schedule %}{{ jobs[e.job][0] if e.job in jobs else e.job }} um {{ e.at }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
+{% endif %}
+
+<h2>Letzte Jobs</h2>
+<div class="list">{% set job_list = recent_jobs %}{% include "_job_rows.html" %}</div>
+{% endblock %}

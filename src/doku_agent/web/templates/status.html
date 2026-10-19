@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Status{% endblock %}
+{% block content %}
+<h1>Status</h1>
+<p class="lede">Verbindungstest zu allen Diensten. Ausgehende Verbindungen sind nur zu den unten aufgeführten Hosts erlaubt – alles andere blockiert der Agent, bevor ein Byte gesendet wird.</p>
+<table class="kv">
+  {% for name, ok, detail in checks %}
+  <tr><th>{{ name }}</th><td><span class="{{ 'ok' if ok else 'bad' }}">{{ 'erreichbar' if ok else 'Fehler' }}</span> – {{ detail }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Erlaubte Hosts</h2>
+<p>{% for h in hosts %}<code>{{ h }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+
+<h2>Ignorierliste</h2>
+{% if ignores %}
+<div class="list">
+  {% for i in ignores %}
+  <div>
+    <span class="id">–</span>
+    <span class="title"><code>{{ i.key }}</code><span class="sub">{{ i.reason }}, {{ i.created_at[:10] }}</span></span>
+    <form method="post" action="/ignorierliste/entfernen">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="key" value="{{ i.key }}">
+      <button type="submit">Wieder vorschlagen</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+{% else %}<p class="muted">Leer. Abgelehnte Vorschläge mit „Nicht mehr vorschlagen“ landen hier.</p>{% endif %}
+{% endblock %}
