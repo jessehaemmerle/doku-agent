@@ -50,6 +50,16 @@ def _fortigate(ctx: Context, params: dict):
     return document_fortigate(ctx, params.get("device", ""), params.get("vdom", ""), sections or None)
 
 
+def _fortigate_netbox(ctx: Context, params: dict):
+    from doku_agent.fortigate_netbox import sync_fortigates
+    return sync_fortigates(ctx, params.get("device", ""))
+
+
+def _switches(ctx: Context, params: dict):
+    from doku_agent.switches import sync_switches
+    return sync_switches(ctx, params.get("host", ""))
+
+
 def _netbox_device(ctx: Context, params: dict):
     from doku_agent.generators.netbox_docs import document_object
     return document_object(ctx, params.get("kind", "device"), int(params["id"]))
@@ -89,7 +99,9 @@ JOBS = {
     "wazuh_config": ("Wazuh: Manager- und Gruppen-Konfiguration", _wazuh_config),
     "wazuh_sca": ("Wazuh: SCA-Ergebnisse", _wazuh_sca),
     "intune": ("Intune: Richtlinien, Profile, Apps, Gruppen", _intune),
-    "fortigate": ("FortiGate: Regeln, NAT, Objekte, Netzwerk, VPN", _fortigate),
+    "fortigate": ("FortiGate: Regeln, NAT, Objekte, Netzwerk, VPN, Prüfung", _fortigate),
+    "fortigate_netbox": ("FortiGate → Netbox: Interfaces, IPs, VLANs, Präfixe", _fortigate_netbox),
+    "switches": ("Switches (SNMP) → Netbox: Ports und Kabel", _switches),
     "netbox_device": ("Netbox: Steckbrief eines Geräts", _netbox_device),
     "netbox_devices": ("Netbox: Steckbriefe aller Geräte", _netbox_devices),
     "freeform": ("Freie Dokumentation", _freeform),
@@ -98,7 +110,7 @@ JOBS = {
 }
 # Jobs ohne Pflichtparameter, die über UI/CLI/Scheduler direkt gestartet werden können.
 STARTABLE = ["discovery", "wazuh_rules", "wazuh_decoders", "wazuh_config", "wazuh_sca", "intune", "fortigate",
-             "netbox_devices", "wiki_index", "wiki_lint"]
+             "fortigate_netbox", "switches", "netbox_devices", "wiki_index", "wiki_lint"]
 
 
 class _JobLogHandler(logging.Handler):

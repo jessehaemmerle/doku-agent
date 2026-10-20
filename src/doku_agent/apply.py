@@ -60,6 +60,7 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
             raise ApplyError("Die Seite wurde nach dem Vorschlag im Wiki geändert und der Vorschlag manuell "
                              "bearbeitet – bitte Vorschlag verwerfen und neu erzeugen.")
         new, _ = merge_into(page.content, _blocks(payload), payload.get("ops", []))
+        new = markdown.replace_links(new, payload.get("replacements"))  # Link-Korrekturen des Wiki-Lint
         payload["base_hash"] = sha(page.content)
         return _requeue(ctx, prop, payload, page.content, new,
                         "Seite wurde zwischenzeitlich geändert – Vorschlag neu berechnet, bitte erneut prüfen.")

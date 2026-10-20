@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from doku_agent import markdown, netbox_fields
-from doku_agent.config import NetboxConfig, NetboxCustomFields
+from doku_agent.config import NetboxConfig, NetboxCustomFields, VCenterConfig
 from doku_agent.connectors.netbox import NetboxClient
 from doku_agent.context import Context
 from doku_agent.conventions import slugify
@@ -34,6 +34,21 @@ class DiscoveryError(RuntimeError):
 def netbox_slug(text: str) -> str:
     """Netbox-Slug: nur Buchstaben, Ziffern, '-' und '_', höchstens 100 Zeichen (Punkte sind nicht erlaubt)."""
     return slugify(text).replace(".", "-").strip("-")[:100].strip("-") or "unbekannt"
+
+
+SERIAL_MAX = 50  # Netbox: serial höchstens 50 Zeichen
+
+
+def serial_key(serial: str | None) -> str:
+    """Vergleichsschlüssel ohne Leerzeichen und Groß-/Kleinschreibung: VMware-Seriennummern
+    ("VMware-42 1a 2b …", 54 Zeichen) stehen in Netbox gekürzt, sind aber dieselbe Maschine."""
+    return re.sub(r"\s+", "", serial or "").upper()
+
+
+def netbox_serial(serial: str | None) -> str:
+    """Seriennummer so, wie sie in Netbox passt (Leerzeichen entfernen, falls zu lang)."""
+    s = (serial or "").strip()
+    return s if len(s) <= SERIAL_MAX else re.sub(r"\s+", "", s)[:SERIAL_MAX]
 
 
 def norm_serial(serial: str | None) -> str:
@@ -95,9 +110,12 @@ class Asset:
     interfaces: list[Iface] = field(default_factory=list)
     sources: dict[str, dict] = field(default_factory=dict)
     is_virtual: bool = False
+    role: str = ""  # feste Netbox-Rolle (z.B. ESXi-Host "hypervisor"), sonst nach Betriebssystem
+    disks: list[tuple[str, int]] = field(default_factory=list)  # (Name, Größe in MB) – aus dem vCenter
 
     @property
     def key(self) -> str:
+        # unverändert lassen: Dedup-Schlüssel von Vorschlägen und Ignorierliste hängen daran
         return f"serial:{self.serial.upper()}" if self.serial else f"name:{self.name.lower()}"
 
     @property
@@ -115,6 +133,8 @@ class Asset:
         self.cpu_cores = self.cpu_cores or other.cpu_cores
         self.memory_mb = self.memory_mb or other.memory_mb
         self.is_virtual = self.is_virtual or other.is_virtual
+        self.role = self.role or other.role
+        self.disks = self.disks or other.disks
         self.sources.update(other.sources)
         by_mac = {i.mac: i for i in self.interfaces if i.mac}
         for iface in other.interfaces:
@@ -204,7 +224,7 @@ def merge_assets(assets: list[Asset]) -> list[Asset]:
     by_name: dict[str, Asset] = {}
     by_mac: dict[str, Asset] = {}
     for asset in assets:
-        target = (by_serial.get(asset.serial.upper()) if asset.serial else None) \
+        target = (by_serial.get(serial_key(asset.serial)) if asset.serial else None) \
             or by_name.get(asset.name.lower()) \
             or next((by_mac[m] for m in asset.identifying_macs if m in by_mac), None)
         if target is None:
@@ -213,7 +233,7 @@ def merge_assets(assets: list[Asset]) -> list[Asset]:
         else:
             target.merge(asset)
         if target.serial:
-            by_serial[target.serial.upper()] = target
+            by_serial[serial_key(target.serial)] = target
         if target.name:
             by_name[target.name.lower()] = target
         for mac in target.identifying_macs:
@@ -255,7 +275,7 @@ class NetboxIndex:
                 if cf and values.get(cf.intune_device_id):
                     self.intune_ids[str(values[cf.intune_device_id])] = key
                 if norm_serial(obj.get("serial")):
-                    self.serials[obj["serial"].strip().upper()] = key
+                    self.serials[serial_key(obj["serial"])] = key
                 if obj.get("name"):
                     self.names[obj["name"].lower()] = key
                     self.names.setdefault(short_name(obj["name"]).lower(), key)
@@ -278,8 +298,8 @@ class NetboxIndex:
         device_id = str((asset.sources.get("intune") or {}).get("id") or "")
         if device_id in self.intune_ids:
             return (*self.intune_ids[device_id], "intune_id")
-        if asset.serial and asset.serial.upper() in self.serials:
-            return (*self.serials[asset.serial.upper()], "serial")
+        if asset.serial and serial_key(asset.serial) in self.serials:
+            return (*self.serials[serial_key(asset.serial)], "serial")
         if asset.name.lower() in self.names:
             return (*self.names[asset.name.lower()], "name")
         for mac in sorted(asset.identifying_macs):
@@ -312,13 +332,15 @@ def _role_for(asset: Asset, cfg: NetboxConfig) -> str:
 
 
 def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int,
-               custom_fields: dict[str, dict] | None = None) -> tuple[list[dict], list[str]]:
-    """custom_fields: Werte je Endpunkt (Gerät/VM), soweit die Felder in Netbox existieren."""
+               custom_fields: dict[str, dict] | None = None, vcenter: VCenterConfig | None = None,
+               host_device: dict | None = None) -> tuple[list[dict], list[str]]:
+    """custom_fields: Werte je Endpunkt (Gerät/VM), soweit die Felder in Netbox existieren.
+    vcenter/host_device: Cluster aus dem vCenter sicherstellen und die VM ihrem ESXi-Host zuordnen."""
     steps: list[dict] = []
     hints: list[str] = []
     vm = detect_virtual(asset, cfg)
     sources = ", ".join(sorted(asset.sources))
-    role = _role_for(asset, cfg)
+    role = asset.role or _role_for(asset, cfg)
     steps.append({"ref": "role", "action": "ensure", "endpoint": "dcim/device-roles", "lookup": {"slug": role},
                   "data": {"name": role.replace("-", " ").title(), "slug": role, "color": "9e9e9e", "vm_role": True},
                   "note": f"Rolle '{role}'"})
@@ -335,7 +357,7 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int,
     common = {"name": asset.name, "role": "$role", "site": site_id, "status": cfg.status,
               "description": f"Auto-Discovery ({sources})", "comments": "\n".join(comments)}
     if asset.serial:
-        common["serial"] = asset.serial
+        common["serial"] = netbox_serial(asset.serial)
     if asset.os_name:
         common["platform"] = "$platform"
 
@@ -344,9 +366,23 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int,
         if custom_fields.get(endpoint):
             common["custom_fields"] = dict(custom_fields[endpoint])
 
+    vc = asset.sources.get("vcenter") or {}
+    cluster = vc.get("cluster") if vcenter else ""
+    if cluster:
+        from doku_agent.vcenter_inventory import cluster_steps
+        steps += cluster_steps(cluster, vcenter, site_id, nb)
+
     if vm:
         data = {**common}
-        if cfg.vm_cluster:
+        if cluster:
+            data["cluster"] = "$cluster"
+            host_cluster = ((host_device or {}).get("cluster") or {}).get("name")
+            if host_device and host_cluster == cluster:
+                data["device"] = host_device["id"]
+            elif vc.get("host"):
+                hints.append(f"ESXi-Host {vc['host']} ist noch nicht (oder nicht im Cluster {cluster}) in Netbox – "
+                             "die Zuordnung zum Host folgt beim nächsten Abgleich.")
+        elif cfg.vm_cluster:
             data["cluster"] = cfg.vm_cluster
         if asset.cpu_cores:
             data["vcpus"] = asset.cpu_cores
@@ -354,6 +390,11 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int,
             data["memory"] = asset.memory_mb
         steps.append({"ref": "dev", "action": "create", "endpoint": "virtualization/virtual-machines", "data": data,
                       "note": f"Virtuelle Maschine '{asset.name}'"})
+        if vcenter and vcenter.virtual_disks:
+            for name, size in asset.disks:
+                steps.append({"action": "create", "endpoint": "virtualization/virtual-disks",
+                              "data": {"virtual_machine": "$dev", "name": name, "size": size},
+                              "note": f"Disk {name} ({size} MB)"})
         if_endpoint, if_parent, obj_type = "virtualization/interfaces", "virtual_machine", "virtualization.vminterface"
     else:
         manufacturer = asset.manufacturer or cfg.unknown_manufacturer
@@ -366,8 +407,11 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int,
                       "data": {"manufacturer": "$mfr", "model": model, "slug": tslug}, "note": f"Gerätetyp '{model}'"})
         if not asset.model:
             hints.append("Modell unbekannt (Wazuh liefert keine Herstellerdaten) – bitte Gerätetyp prüfen.")
+        device_data = {**common, "device_type": "$dtype"}
+        if cluster:
+            device_data["cluster"] = "$cluster"
         steps.append({"ref": "dev", "action": "create", "endpoint": "dcim/devices",
-                      "data": {**common, "device_type": "$dtype"}, "note": f"Gerät '{asset.name}'"})
+                      "data": device_data, "note": f"Gerät '{asset.name}'"})
         if_endpoint, if_parent, obj_type = "dcim/interfaces", "device", "dcim.interface"
 
     primary_ref = None
@@ -454,6 +498,32 @@ def update_last_seen(ctx: Context, asset: Asset, found: tuple[str, int, str], in
     return True
 
 
+def collect_assets(ctx: Context) -> list[Asset]:
+    """Inventar aller Quellen, zusammengeführt (auch für den Abdeckungsbericht)."""
+    cfg = ctx.cfg
+    # Wazuh zuerst: dessen OS-Angaben sind genauer als Intunes "Windows"; Intune ergänzt Hersteller und Modell.
+    raw: list[Asset] = []
+    if cfg.wazuh.enabled:
+        raw += wazuh_assets(ctx)
+        ctx.log.info("Wazuh: %s Agents mit Inventar", len(raw))
+    if cfg.vcenter.enabled:  # nach Wazuh: Hostname und OS aus dem Gast sind genauer als der VM-Name
+        from doku_agent.vcenter_inventory import vcenter_assets
+        vc = vcenter_assets(ctx)
+        ctx.log.info("vCenter: %s Hosts und VMs", len(vc))
+        raw += vc
+    if cfg.intune.enabled:
+        it = intune_assets(ctx)
+        ctx.log.info("Intune: %s Geräte", len(it))
+        raw += it
+    assets = merge_assets(raw)
+    if cfg.vcenter.enabled:
+        from doku_agent.vcenter_inventory import apply_precedence
+        for asset in assets:
+            apply_precedence(asset)
+    ctx.log.info("%s Maschinen nach Zusammenführung", len(assets))
+    return assets
+
+
 def run_discovery(ctx: Context) -> dict:
     cfg = ctx.cfg
     if not cfg.netbox.site:
@@ -463,17 +533,7 @@ def run_discovery(ctx: Context) -> dict:
     if not site:
         raise DiscoveryError(f"Standort '{cfg.netbox.site}' existiert nicht in Netbox")
 
-    # Wazuh zuerst: dessen OS-Angaben sind genauer als Intunes "Windows"; Intune ergänzt Hersteller und Modell.
-    raw: list[Asset] = []
-    if cfg.wazuh.enabled:
-        raw += wazuh_assets(ctx)
-        ctx.log.info("Wazuh: %s Agents mit Inventar", len(raw))
-    if cfg.intune.enabled:
-        it = intune_assets(ctx)
-        ctx.log.info("Intune: %s Geräte", len(it))
-        raw += it
-    assets = merge_assets(raw)
-    ctx.log.info("%s Maschinen nach Zusammenführung", len(assets))
+    assets = collect_assets(ctx)
 
     index = NetboxIndex(nb, cfg.netbox.custom_fields)
     for hint in index.fields.hints:
@@ -515,7 +575,12 @@ def run_discovery(ctx: Context) -> dict:
         vm = detect_virtual(asset, cfg.netbox)
         values = {ep: netbox_fields.values_for(asset.sources, cfg.netbox.custom_fields, names, cfg.general.timezone)
                   for ep, names in index.fields.available.items()}
-        steps, hints = build_plan(asset, nb, cfg.netbox, site["id"], values)
+        host = None
+        if cfg.vcenter.enabled:
+            from doku_agent.vcenter_inventory import host_device_for
+            host = host_device_for(asset, index)
+        steps, hints = build_plan(asset, nb, cfg.netbox, site["id"], values,
+                                  cfg.vcenter if cfg.vcenter.enabled else None, host)
         ctx.store.add_proposal(
             "netbox_plan", f"Netbox: {'VM' if vm else 'Gerät'} {asset.name} anlegen",
             {"steps": steps, "hints": hints, "asset": asset.__dict__ | {"interfaces": [i.__dict__ for i in asset.interfaces]},
@@ -523,5 +588,11 @@ def run_discovery(ctx: Context) -> dict:
             summary=plan_summary(asset, vm, steps), source="discovery", dedup_key=dedup,
         )
         stats["vorgeschlagen"] += 1
+    if cfg.coverage.enabled:
+        from doku_agent.coverage import propose_coverage
+        try:
+            stats["abdeckung"] = "Vorschlag" if propose_coverage(ctx, assets, index) else "unverändert"
+        except Exception as exc:  # Bericht darf die Discovery nicht scheitern lassen
+            ctx.log.warning("Abdeckungsbericht nicht erstellt: %s", exc)
     ctx.log.info("Discovery: %s", stats)
     return stats

@@ -34,6 +34,10 @@ def allowed_hosts(cfg: Config) -> set[str]:
         hosts.update(GRAPH_HOSTS)
     if cfg.fortigate.enabled:
         hosts.update(_host(d.url) for d in cfg.fortigate.devices)
+    if cfg.vcenter.enabled:
+        hosts.add(_host(cfg.vcenter.url))
+    if cfg.switches.enabled:  # SNMP (UDP 161), geprüft im SNMP-Client
+        hosts.update(d.host.lower() for d in cfg.switches.devices)
     hosts.update(h.lower() for h in cfg.egress.extra_allowed_hosts)
     hosts.discard("")
     return hosts

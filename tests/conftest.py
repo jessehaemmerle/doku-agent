@@ -71,10 +71,14 @@ class FakeWiki:
         elif "search(" in q:
             data = {"pages": {"search": {"results": []}}}
         elif "links(" in q:  # wie Wiki.js: interne Links je Seite als "locale/pfad", auch auf fehlende Seiten
+            def resolve(page, href):
+                if "://" in href or "." in href or href.startswith(("#", "mailto:")):
+                    return None
+                path = href.lstrip("/") if href.startswith("/") else f"{page['path']}/{href}"
+                return "de/" + path.removeprefix("de/")
             data = {"pages": {"links": [
                 {"id": p["id"], "path": f"de/{p['path']}", "title": p["title"],
-                 "links": [f"de/{m.removeprefix('de/')}" for m in re.findall(r"\]\(/([^)\s#]+)", p["content"])
-                           if "." not in m]}
+                 "links": [t for m in re.findall(r"\]\(([^)\s#]+)", p["content"]) if (t := resolve(p, m))]}
                 for p in self.pages.values()]}}
         elif "create(" in q:
             pid = self.add(v["path"], v["title"], v["content"], v["tags"], v["description"])

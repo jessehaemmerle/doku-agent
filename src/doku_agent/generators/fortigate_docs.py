@@ -26,6 +26,7 @@ SECTIONS = {
     "objects": ("objekte", "Objekte"),
     "network": ("netzwerk", "Netzwerk"),
     "vpn": ("vpn", "VPN"),
+    "audit": ("pruefung", "Prüfung"),
 }
 _SECRET_KEY = re.compile(r"(?i)(psk|secret|passw|passphrase|private-key|ppk|^key$|-key$)")
 ACTIONS = {"accept": "erlauben", "deny": "verwerfen", "ipsec": "IPsec"}
@@ -111,6 +112,7 @@ _NEEDS = {
     "objects": {"policies", "objects", "vips"},
     "network": {"interfaces", "zones", "routes"},
     "vpn": {"vpn", "objects", "vips"},
+    "audit": {"policies", "objects", "vips", "interfaces", "zones"},
 }
 
 
@@ -124,8 +126,9 @@ def fetch(client: FortiGateClient, vdom: str, sections: list[str]) -> FortiData:
     if "policies" in need:
         data.policies = get("firewall/policy")
     if "objects" in need:
-        data.addresses = get("firewall/address") + get("firewall/address6", optional=True)
-        data.addrgrps = get("firewall/addrgrp") + get("firewall/addrgrp6", optional=True)
+        # IPv4- und IPv6-Objekte dürfen gleich heißen (FortiOS liefert "all" in beiden) -> Familie merken
+        data.addresses = get("firewall/address") + [dict(a, _v6=True) for a in get("firewall/address6", optional=True)]
+        data.addrgrps = get("firewall/addrgrp") + [dict(g, _v6=True) for g in get("firewall/addrgrp6", optional=True)]
         data.services = get("firewall.service/custom")
         data.service_groups = get("firewall.service/group")
     if "vips" in need:
@@ -153,21 +156,29 @@ class Resolver:
     """Löst Adress-, Dienst- und VIP-Namen in lesbare Werte auf."""
 
     def __init__(self, data: FortiData):
-        self.addresses = {a.get("name"): a for a in data.addresses}
-        self.addrgrps = {g.get("name"): g for g in data.addrgrps}
+        def by_family(objs):  # (IPv4 gewinnt, IPv6 gewinnt) – fehlt ein Name in einer Familie, gilt die andere
+            v4 = {o.get("name"): o for o in objs if not o.get("_v6")}
+            v6 = {o.get("name"): o for o in objs if o.get("_v6")}
+            return {**v6, **v4}, {**v4, **v6}
+
+        self.addresses, self.addresses6 = by_family(data.addresses)
+        self.addrgrps, self.addrgrps6 = by_family(data.addrgrps)
         self.services = {s.get("name"): s for s in data.services}
         self.service_groups = {g.get("name"): g for g in data.service_groups}
         self.vips = {v.get("name"): v for v in data.vips}
         self.vipgrps = {g.get("name"): g for g in data.vipgrps}
 
-    def address(self, name: str) -> str:
-        if name in self.addrgrps:
-            return "Gruppe: " + ", ".join(names(self.addrgrps[name].get("member")))
+    def groups(self, v6: bool = False) -> dict:
+        return self.addrgrps6 if v6 else self.addrgrps
+
+    def address(self, name: str, v6: bool = False) -> str:
+        if name in self.groups(v6):
+            return "Gruppe: " + ", ".join(names(self.groups(v6)[name].get("member")))
         if name in self.vips:
             return "VIP: " + vip_mapping(self.vips[name])
         if name in self.vipgrps:
             return "VIP-Gruppe: " + ", ".join(names(self.vipgrps[name].get("member")))
-        a = self.addresses.get(name)
+        a = (self.addresses6 if v6 else self.addresses).get(name)
         if a is None:
             return ""
         kind = a.get("type") or "ipmask"
@@ -234,9 +245,9 @@ def _join(values: list[str]) -> str:
 def policy_view(p: dict, r: Resolver) -> dict:
     """Kompakte, aufgelöste Sicht auf eine Regel – für Tabelle, Details und LLM."""
     def side(key: str, key6: str, negate: str) -> list[str]:
-        items = names(p.get(key)) + names(p.get(key6))
+        items = [(n, False) for n in names(p.get(key))] + [(n, True) for n in names(p.get(key6))]
         prefix = "nicht " if p.get(negate) == "enable" else ""
-        return [prefix + (f"{n} ({r.address(n)})" if r.address(n) and r.address(n) != n else n) for n in items]
+        return [prefix + (f"{n} ({v})" if (v := r.address(n, six)) and v != n else n) for n, six in items]
 
     source = side("srcaddr", "srcaddr6", "srcaddr-negate")
     who = names(p.get("users")) + names(p.get("groups"))
@@ -442,7 +453,8 @@ def nat_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
 def objects_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
     r = Resolver(data)
     addr_usage, svc_usage = _usage(data)
-    addr_rows = [[a.get("name"), a.get("type") or ("ipv6" if "ip6" in a else "ipmask"), r.address(a.get("name")),
+    addr_rows = [[a.get("name"), a.get("type") or ("ipv6" if "ip6" in a else "ipmask"),
+                  r.address(a.get("name"), a.get("_v6", False)),
                   a.get("associated-interface") or "", a.get("comment") or "", _ids(addr_usage.get(a.get("name"), set()))]
                  for a in data.addresses]
     grp_rows = [[g.get("name"), _join(names(g.get("member"))), g.get("comment") or "",
@@ -554,8 +566,309 @@ def vpn_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
     ]
 
 
+# --- Prüfung (Hygiene) des Regelwerks ------------------------------------------
+
+V4_ALL = (4, 0, 2 ** 32 - 1)
+V6_ALL = (6, 0, 2 ** 128 - 1)
+SVC_ALL = ("all", 0, 0)
+
+
+def _net_interval(value: str) -> tuple[int, int, int] | None:
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None
+    return (net.version, int(net.network_address), int(net.broadcast_address))
+
+
+def _range_interval(start: str, end: str) -> tuple[int, int, int] | None:
+    try:
+        a, b = ipaddress.ip_address(start), ipaddress.ip_address(end or start)
+    except ValueError:
+        return None
+    return (a.version, int(a), int(b)) if a.version == b.version else None
+
+
+class AddressSets:
+    """Adress- und Dienstobjekte als Intervalle; nicht auflösbare Objekte (FQDN, Land, ...) als Marke."""
+
+    def __init__(self, data: FortiData):
+        self.r = Resolver(data)
+
+    def address(self, name: str, depth: int = 0, v6: bool = False) -> tuple[set, set]:
+        intervals, opaque = set(), set()
+        r = self.r
+        marker = f"obj6:{name}" if v6 else f"obj:{name}"
+        if depth > 10:
+            return intervals, {marker}
+        if name in r.groups(v6) or name in r.vipgrps:
+            group = r.groups(v6).get(name) or r.vipgrps.get(name)
+            for member in names(group.get("member")):
+                i, o = self.address(member, depth + 1, v6)
+                intervals |= i
+                opaque |= o
+            return intervals, opaque
+        if name in r.vips:
+            ext = r.vips[name].get("extip") or ""
+            iv = _range_interval(*ext.split("-", 1)) if "-" in ext else _range_interval(ext, ext)
+            return ({iv} if iv else set()), ({f"vip:{name}"} if not iv else set())
+        a = (r.addresses6 if v6 else r.addresses).get(name)
+        if a is None:
+            return intervals, {marker}
+        kind = a.get("type") or "ipmask"
+        iv = None
+        if kind == "ipmask":
+            parts = (a.get("subnet") or "").split()
+            iv = _net_interval("/".join(parts[:2])) if parts else None
+        elif kind == "ipprefix":
+            iv = _net_interval(a.get("ip6") or "")
+        elif kind == "iprange":
+            iv = _range_interval(a.get("start-ip") or "", a.get("end-ip") or "")
+        return ({iv} if iv else set()), (set() if iv else {marker})
+
+    def side(self, p: dict, key: str, key6: str) -> tuple[set, set]:
+        intervals, opaque = set(), set()
+        for n, six in [(n, False) for n in names(p.get(key))] + [(n, True) for n in names(p.get(key6))]:
+            i, o = self.address(n, v6=six)
+            intervals |= i
+            opaque |= o
+        return intervals, opaque
+
+    def service(self, name: str, depth: int = 0) -> tuple[set, set]:
+        r = self.r
+        if name in r.service_groups and depth < 10:
+            intervals, opaque = set(), set()
+            for member in names(r.service_groups[name].get("member")):
+                i, o = self.service(member, depth + 1)
+                intervals |= i
+                opaque |= o
+            return intervals, opaque
+        s = r.services.get(name)
+        if s is None:
+            return set(), {f"svc:{name}"}
+        proto = (s.get("protocol") or "TCP/UDP/SCTP").upper()
+        if proto == "IP":
+            number = s.get("protocol-number") or 0
+            return ({SVC_ALL} if not number else set()), (set() if not number else {f"ip:{number}"})
+        if proto.startswith("ICMP"):
+            return set(), {f"{proto.lower()}:{s.get('icmptype', 'alle')}"}
+        intervals = set()
+        for label, key in (("tcp", "tcp-portrange"), ("udp", "udp-portrange"), ("sctp", "sctp-portrange")):
+            for rng in (s.get(key) or "").split():
+                dst = rng.split(":")[0]
+                lo, _, hi = dst.partition("-")
+                if lo.isdigit():
+                    intervals.add((label, int(lo), int(hi or lo)))
+        return intervals, (set() if intervals else {f"svc:{name}"})
+
+    def services(self, p: dict) -> tuple[set, set]:
+        intervals, opaque = set(), set()
+        for n in names(p.get("service")):
+            i, o = self.service(n)
+            intervals |= i
+            opaque |= o
+        return intervals, opaque
+
+
+def _covered(outer: set, inner: tuple) -> bool:
+    family = inner[0]
+    spans = sorted((lo, hi) for f, lo, hi in outer if f == family)
+    pos = inner[1]
+    for lo, hi in spans:
+        if lo > pos:
+            return False
+        if hi >= pos:
+            pos = hi + 1
+            if pos > inner[2]:
+                return True
+    return pos > inner[2]
+
+
+def covers(a: tuple[set, set], b: tuple[set, set], everything: tuple) -> bool:
+    """Deckt Menge a die Menge b vollständig ab? 'everything' sind die Intervalle für 'beliebig'."""
+    a_iv, a_op = a
+    if any(_covered(a_iv, e) for e in everything):
+        return True  # a ist beliebig (IPv4 "all" bzw. IPv6 "all"): deckt alles, auch FQDN-/Länder-Objekte
+    b_iv, b_op = b
+    return b_op <= a_op and all(_covered(a_iv, iv) for iv in b_iv)
+
+
+def _is_any(sets: tuple[set, set], everything: tuple) -> bool:
+    return all(_covered(sets[0], e) for e in everything)
+
+
+def audit(data: FortiData) -> dict[str, list]:
+    sets = AddressSets(data)
+    wan = {i.get("name") for i in data.interfaces if i.get("role") == "wan"}
+    wan |= {z.get("name") for z in data.zones if wan & set(names(z.get("interface")))}
+    findings: dict[str, list] = {"shadowed": [], "any_any": [], "no_log": [], "no_profile": [], "disabled": [],
+                                 "unused": []}
+    seen: list[tuple[dict, tuple, tuple, tuple]] = []
+    addr_all, svc_all = (V4_ALL, V6_ALL), (SVC_ALL,)
+    tcp_udp_all = tuple((p, 0, 65535) for p in ("tcp", "udp", "sctp"))
+    for p in data.policies:
+        pid, name = str(p.get("policyid", "")), p.get("name") or ""
+        if p.get("status") == "disable":
+            findings["disabled"].append([pid, name])
+            continue
+        src, dst = sets.side(p, "srcaddr", "srcaddr6"), sets.side(p, "dstaddr", "dstaddr6")
+        svc = sets.services(p)
+        accept = p.get("action") == "accept"
+        simple = not any(p.get(k) == "enable" for k in ("srcaddr-negate", "dstaddr-negate", "service-negate",
+                                                        "internet-service", "internet-service-src"))
+        svc_any = _is_any(svc, svc_all) or all(_covered(svc[0], e) for e in tcp_udp_all)
+        if accept and _is_any(src, addr_all[:1]) and _is_any(dst, addr_all[:1]) and svc_any and simple:
+            findings["any_any"].append([pid, name, f"{_join(names(p.get('srcintf')))} → {_join(names(p.get('dstintf')))}"])
+        if accept and p.get("logtraffic") == "disable":
+            findings["no_log"].append([pid, name])
+        intfs = set(names(p.get("srcintf"))) | set(names(p.get("dstintf")))
+        if accept and intfs & wan and p.get("utm-status") != "enable":
+            findings["no_profile"].append([pid, name, ", ".join(sorted(intfs & wan))])
+        if simple:
+            for earlier, e_src, e_dst, e_svc in seen:
+                e_in, e_out = set(names(earlier.get("srcintf"))), set(names(earlier.get("dstintf")))
+                if not ({"any"} & e_in or set(names(p.get("srcintf"))) <= e_in):
+                    continue
+                if not ({"any"} & e_out or set(names(p.get("dstintf"))) <= e_out):
+                    continue
+                if earlier.get("schedule", "always") not in ("always", p.get("schedule", "always")):
+                    continue
+                who = set(names(earlier.get("users"))) | set(names(earlier.get("groups")))
+                if who and who != set(names(p.get("users"))) | set(names(p.get("groups"))):
+                    continue
+                if covers(e_src, src, addr_all) and covers(e_dst, dst, addr_all) and covers(e_svc, svc, svc_all):
+                    other = earlier.get("action") != p.get("action")
+                    findings["shadowed"].append([pid, name, str(earlier.get("policyid", "")),
+                                                 "andere Aktion – Regel greift nie" if other else "gleiche Aktion – überflüssig"])
+                    break
+            seen.append((p, src, dst, svc))
+    addr_usage, svc_usage = _usage(data)
+    for kind, objs, usage in (("Adresse", data.addresses, addr_usage), ("Adressgruppe", data.addrgrps, addr_usage),
+                              ("Dienst", [s for s in data.services if not s.get("category")], svc_usage),
+                              ("Dienstgruppe", data.service_groups, svc_usage)):
+        for o in objs:
+            if not usage.get(o.get("name")) and o.get("name") not in ("all", "none", "ALL"):
+                findings["unused"].append([kind, o.get("name")])
+    return findings
+
+
+# --- Regeln, die eine bestimmte Maschine betreffen (für den Netbox-Steckbrief) ------------------
+
+def _vip_maps(v: dict, ip: int) -> bool:
+    for rng in names(v.get("mappedip")) or [v.get("mapped-addr") or ""]:
+        start, _, end = rng.partition("-")
+        iv = _range_interval(start, end or start)
+        if iv and iv[0] == 4 and iv[1] <= ip <= iv[2]:
+            return True
+    return False
+
+
+def _object_hits(sets: AddressSets, name: str, ip: int, min_prefix: int, depth: int = 0) -> str:
+    """Name des (Teil-)Objekts, über das die IP gezielt erfasst ist – '' wenn nicht (oder nur als großes Netz)."""
+    r = sets.r
+    if depth > 10:
+        return ""
+    if name in r.vips:
+        return f"VIP {name} ({vip_mapping(r.vips[name])})" if _vip_maps(r.vips[name], ip) else ""
+    if name in r.addrgrps or name in r.vipgrps:
+        group = r.addrgrps.get(name) or r.vipgrps.get(name)
+        for member in names(group.get("member")):
+            hit = _object_hits(sets, member, ip, min_prefix, depth + 1)
+            if hit:
+                return f"{name} → {hit}"
+        return ""
+    intervals, _ = sets.address(name)
+    largest = 2 ** (32 - min_prefix)
+    for family, lo, hi in intervals:
+        if family == 4 and lo <= ip <= hi and hi - lo + 1 <= largest:
+            return name
+    return ""
+
+
+def machine_rules(data: FortiData, hosts: list[str], min_prefix: int) -> list[list]:
+    """Regeln, deren Quelle oder Ziel eine der IPs über Host-, Bereichs-, VIP- oder Netzobjekte bis
+    /min_prefix erfasst ('beliebig' und große Netze zählen nicht)."""
+    sets = AddressSets(data)
+    r = sets.r
+    ips = []
+    for h in hosts:
+        try:
+            addr = ipaddress.ip_address(h)
+        except ValueError:
+            continue
+        if addr.version == 4:
+            ips.append(int(addr))
+    rows = []
+    for p in data.policies:
+        view = policy_view(p, r)
+        for direction, key, other_key in (("ausgehend", "srcaddr", "dstaddr"), ("eingehend", "dstaddr", "srcaddr")):
+            if p.get(f"{key}-negate") == "enable":  # "alles außer …" betrifft die Maschine gerade nicht gezielt
+                continue
+            hit = ""
+            for ip in ips:
+                hit = next((h for n in names(p.get(key)) if (h := _object_hits(sets, n, ip, min_prefix))), "")
+                if hit:
+                    break
+            if not hit:
+                continue
+            other = view["ziel"] if direction == "ausgehend" else view["quelle"]
+            rows.append([f"{data.device}" + (f"/{data.vdom}" if data.vdom != "root" else ""),
+                         f"{view['id']}" + (f" {view['name']}" if view["name"] else ""), direction,
+                         "<br>".join(other) or "–", "<br>".join(view["dienst"]) or "–", view["aktion"], hit])
+    return rows
+
+
+def rules_for_machine(ctx: Context, hosts: list[str]) -> list[list] | None:
+    """Treffer über alle FortiGates; None, wenn eine Firewall nicht lesbar war (Block dann nicht ändern)."""
+    cfg = ctx.cfg.fortigate
+    cache = ctx.__dict__.setdefault("_fortigate_rules_cache", {})
+    rows = []
+    for dev in cfg.devices:
+        for vdom in dev.vdoms:
+            key = (dev.name, vdom)
+            if key not in cache:
+                try:
+                    cache[key] = fetch(ctx.fortigate(dev.name), vdom, ["policies"])
+                except Exception as exc:
+                    ctx.log.warning("FortiGate %s/%s für den Steckbrief nicht lesbar: %s", dev.name, vdom, exc)
+                    cache[key] = None
+            if cache[key] is None:
+                return None
+            rows += machine_rules(cache[key], hosts, cfg.steckbrief_min_prefix)
+    return rows
+
+
+def audit_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
+    f = audit(data)
+    sections = [
+        ("Verdeckte Regeln", "shadowed", ["Regel", "Name", "verdeckt durch Regel", "Bewertung"],
+         "Eine frühere Regel deckt Quelle, Ziel, Dienst und Interfaces vollständig ab."),
+        ("Alles erlaubt (any-any)", "any_any", ["Regel", "Name", "Von → Nach"], "Quelle, Ziel und Dienst beliebig."),
+        ("Erlaubt ohne Logging", "no_log", ["Regel", "Name"], ""),
+        ("Internet ohne Sicherheitsprofil", "no_profile", ["Regel", "Name", "WAN-Interface"],
+         "Erlaubter Verkehr über ein WAN-Interface ohne Virenschutz, IPS oder Webfilter."),
+        ("Deaktivierte Regeln", "disabled", ["Regel", "Name"], ""),
+        ("Nicht verwendete Objekte", "unused", ["Art", "Name"], "Kandidaten zum Aufräumen (vordefinierte Dienste ausgenommen)."),
+    ]
+    labels = {"shadowed": "Verdeckte Regeln", "any_any": "any-any", "no_log": "ohne Logging",
+              "no_profile": "Internet ohne Profil", "disabled": "deaktiviert", "unused": "unbenutzte Objekte"}
+    overview = _overview(data, [[labels[k], len(v)] for k, v in f.items()])
+    body = []
+    for title, key, headers, note in sections:
+        rows = f[key]
+        text = markdown.table(headers, rows) if rows else "_Keine Befunde._"
+        body.append(f"### {title}\n\n" + (f"{note}\n\n" if note and rows else "") + text)
+    return ("Automatische Prüfung des Regelwerks: verdeckte und zu breite Regeln, fehlendes Logging, Internet-Verkehr "
+            "ohne Sicherheitsprofil, deaktivierte Regeln und unbenutzte Objekte. Verdeckte Regeln werden nur für "
+            "auflösbare Objekte erkannt (IP-Netze, Bereiche, Ports); FQDN- und Länderobjekte gelten nur bei gleichem "
+            "Namen als abgedeckt."), [
+        Block("fortigate-audit-overview", "Übersicht", overview),
+        Block("fortigate-audit-findings", "Befunde", "\n\n".join(body)),
+    ]
+
+
 BUILDERS = {"policies": policies_page, "nat": nat_page, "objects": objects_page, "network": network_page,
-            "vpn": vpn_page}
+            "vpn": vpn_page, "audit": audit_page}
 
 
 def stable_id(device: str, vdom: str, section: str) -> str:

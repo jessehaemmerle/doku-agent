@@ -212,6 +212,17 @@ class Store:
         with self._conn() as db:
             return db.execute("SELECT COUNT(*) FROM proposals WHERE status='pending'").fetchone()[0]
 
+    def pending_dedup_keys(self) -> set[str]:
+        with self._conn() as db:
+            rows = db.execute("SELECT dedup_key FROM proposals WHERE status='pending' AND dedup_key IS NOT NULL")
+            return {r[0] for r in rows.fetchall()}
+
+    def pending_by_source(self, source: str) -> list[Proposal]:
+        with self._conn() as db:
+            rows = db.execute("SELECT * FROM proposals WHERE status='pending' AND source=? ORDER BY id",
+                              (source,)).fetchall()
+        return [self._proposal(r) for r in rows]
+
     # --- Jobs ---------------------------------------------------------------
 
     @staticmethod

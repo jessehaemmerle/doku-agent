@@ -77,6 +77,7 @@ class WikiConfig(BaseModel):
         "intune_groups": "clients/intune/gruppen",
         "fortigate": "netzwerk/firewall/{device}/{section}",
         "wiki_lint": "wartung/wiki-lint",
+        "coverage": "infrastruktur/abdeckung",
     })
     # Zusätzliche Tags je Dokutyp (gelernte Tags aus dem Wiki kommen dazu).
     tags: dict[str, list[str]] = Field(default_factory=lambda: {
@@ -90,6 +91,7 @@ class WikiConfig(BaseModel):
         "intune_groups": ["intune"],
         "fortigate": ["firewall", "fortigate"],
         "wiki_lint": [],
+        "coverage": ["netbox"],
     })
     # Wie viele Seiten pro Bereich zum Lernen der Konventionen gelesen werden.
     convention_sample_pages: int = 5
@@ -178,13 +180,68 @@ class FortiGateDevice(BaseModel):
     token: str  # REST-API-Admin mit Profil nur lesend
     verify_tls: TlsVerify = True
     vdoms: list[str] = Field(default_factory=lambda: ["root"])
+    netbox_site: str = ""  # Standort in Netbox (Slug); leer = netbox.site
 
 
 class FortiGateConfig(BaseModel):
     enabled: bool = False
     devices: list[FortiGateDevice] = Field(default_factory=list)
-    include: list[Literal["policies", "nat", "objects", "network", "vpn"]] = Field(
-        default_factory=lambda: ["policies", "nat", "objects", "network", "vpn"])
+    include: list[Literal["policies", "nat", "objects", "network", "vpn", "audit"]] = Field(
+        default_factory=lambda: ["policies", "nat", "objects", "network", "vpn", "audit"])
+    # FortiGate -> Netbox: Gerät, Interfaces, IPs, VLANs, Präfixe (alles mit Freigabe)
+    netbox_sync: list[Literal["device", "interfaces", "ips", "vlans", "prefixes"]] = Field(
+        default_factory=lambda: ["device", "interfaces", "ips", "vlans", "prefixes"])
+    netbox_role: str = "firewall"  # Slug der Geräterolle
+    netbox_skip_roles: list[str] = Field(default_factory=lambda: ["wan"])  # keine Präfixe für diese Interface-Rollen
+    # Steckbrief: Regeln, die eine Maschine über Host-, Bereichs-, VIP- oder Netzobjekte ab dieser Größe betreffen
+    steckbrief_rules: bool = True
+    steckbrief_min_prefix: int = 24
+
+
+class VCenterConfig(BaseModel):
+    enabled: bool = False
+    url: str = ""  # https://vcenter.example.local
+    username: str = ""  # Benutzer mit Rolle "Nur lesen"
+    password: str = ""
+    verify_tls: TlsVerify = True
+    # Hardware der ESXi-Hosts (Hersteller, Modell, Seriennummer) gibt es nur über die VI/JSON-API
+    # (ab vCenter 8.0 U1). Release-Kennung des vCenters, leer = ohne Hardwaredaten.
+    vijson_release: str = "8.0.1.0"
+    hosts: bool = True  # ESXi-Hosts als Netbox-Geräte
+    host_role: str = "hypervisor"
+    powered_off: bool = True  # ausgeschaltete VMs auch anlegen
+    virtual_disks: bool = True  # Disks einzeln als virtual-disks
+    cluster_type: str = "VMware vSphere"
+
+
+class SnmpCredentials(BaseModel):
+    version: Literal["2c", "3"] = "2c"
+    community: str = ""  # v2c
+    user: str = ""  # v3
+    auth_protocol: Literal["sha", "sha224", "sha256", "sha384", "sha512", "md5"] = "sha256"
+    auth_key: str = ""
+    priv_protocol: Literal["aes", "aes192", "aes256", "des", "3des", "none"] = "aes"
+    priv_key: str = ""
+    port: int = 161
+    timeout_s: float = 5
+    retries: int = 1
+
+
+class SwitchDevice(BaseModel):
+    host: str  # IP oder DNS-Name; nur diese Ziele dürfen per SNMP abgefragt werden
+    name: str = ""  # leer = sysName des Switches
+    netbox_site: str = ""  # leer = netbox.site
+    snmp: SnmpCredentials | None = None  # abweichende Zugangsdaten für diesen Switch
+
+
+class SwitchesConfig(BaseModel):
+    enabled: bool = False
+    snmp: SnmpCredentials = Field(default_factory=SnmpCredentials)
+    devices: list[SwitchDevice] = Field(default_factory=list)
+    netbox_role: str = "switch"
+    # Endgeräte über die MAC-Tabelle verkabeln (nur Ports mit genau so vielen bekannten MACs, keine Uplinks)
+    mac_table: bool = True
+    mac_table_max_macs: int = 1
 
 
 class EmbeddingsConfig(BaseModel):
@@ -199,11 +256,21 @@ class EmbeddingsConfig(BaseModel):
     keep_alive: str = "30m"
 
 
+class CoverageConfig(BaseModel):
+    """Abdeckungsbericht (nach jeder Discovery): wer hat Wazuh, Intune, einen Netbox-Eintrag, wer meldet sich nicht."""
+    enabled: bool = True
+    wazuh_roles: list[str] = Field(default_factory=lambda: ["server", "client"])  # Netbox-Rollen (Slug) mit Wazuh-Pflicht
+    intune_roles: list[str] = Field(default_factory=lambda: ["client"])
+    stale_days: int = 30  # "Funkstille": letzter Kontakt älter als so viele Tage
+
+
 class LintConfig(BaseModel):
     report_page: bool = True  # Bericht zusätzlich als Wiki-Seite (Vorschlag)
     refresh_stale: bool = True  # veraltete Seiten über den passenden Generator neu vorschlagen
     duplicate_threshold: float = 0.93  # Ähnlichkeit (Embeddings), ab der Seiten als mögliche Dubletten gelten
     exclude_paths: list[str] = Field(default_factory=list)  # Pfad-Präfixe, die nicht geprüft werden
+    fix_links: bool = True  # tote Links: eindeutigen Ersatz als Vorschlag (sonst Kandidaten im Bericht)
+    suggest_tags: bool = True  # Seiten ohne Tags: Tags aus Bereich bzw. ähnlichen Seiten vorschlagen
 
 
 class ScheduleEntry(BaseModel):
@@ -241,8 +308,11 @@ class Config(BaseModel):
     wazuh: WazuhConfig = Field(default_factory=WazuhConfig)
     intune: IntuneConfig = Field(default_factory=IntuneConfig)
     fortigate: FortiGateConfig = Field(default_factory=FortiGateConfig)
+    switches: SwitchesConfig = Field(default_factory=SwitchesConfig)
+    vcenter: VCenterConfig = Field(default_factory=VCenterConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     lint: LintConfig = Field(default_factory=LintConfig)
+    coverage: CoverageConfig = Field(default_factory=CoverageConfig)
     schedule: list[ScheduleEntry] = Field(default_factory=list)
     web: WebConfig = Field(default_factory=WebConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)

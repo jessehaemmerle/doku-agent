@@ -12,14 +12,16 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 
 from doku_agent import markdown
-from doku_agent.config import NetboxConfig
+from doku_agent.config import NetboxConfig, VCenterConfig
 from doku_agent.connectors.netbox import NetboxClient
 from doku_agent.context import Context
-from doku_agent.discovery import Asset, NetboxIndex, detect_virtual, netbox_slug, norm_mac, norm_serial, short_name
-from doku_agent.netbox_plan import field_value
+from doku_agent.discovery import (Asset, NetboxIndex, detect_virtual, netbox_serial, netbox_slug, norm_mac, norm_serial,
+                                  serial_key, short_name)
+from doku_agent.netbox_plan import comparable, field_value
 
 CATEGORY_LABELS = {"missing": "Fehlende Angabe", "os": "Betriebssystem/Ressourcen",
-                   "network": "Netzwerk", "rename": "Umbenennung", "ids": "Kennung (Custom Field)"}
+                   "network": "Netzwerk", "rename": "Umbenennung", "ids": "Kennung (Custom Field)",
+                   "vcenter": "vCenter (Cluster, Host, Disks)"}
 
 
 @dataclass
@@ -55,6 +57,7 @@ class _Builder:
         self.oid = obj["id"]
         self.changes: list[Change] = []
         self.hints: list[str] = []
+        self.ctx_vcenter = None  # VCenterConfig, wenn das vCenter angebunden ist
         if self.vm:
             self.if_endpoint, self.if_parent, self.obj_type = (
                 "virtualization/interfaces", "virtual_machine", "virtualization.vminterface")
@@ -82,11 +85,12 @@ class _Builder:
 
     def serial(self):
         current = norm_serial(self.obj.get("serial"))
-        if not self.asset.serial or current.upper() == self.asset.serial.upper():
+        if not self.asset.serial or serial_key(current) == serial_key(netbox_serial(self.asset.serial)):
             return
         if not current:
-            self.add("serial", "missing", "Seriennummer", "", self.asset.serial,
-                     [self.update({"serial": self.asset.serial}, "Seriennummer setzen")], check_field="serial")
+            value = netbox_serial(self.asset.serial)
+            self.add("serial", "missing", "Seriennummer", "", value,
+                     [self.update({"serial": value}, "Seriennummer setzen")], check_field="serial")
         else:
             self.hints.append(f"Seriennummer weicht ab: Netbox {current}, Quelle {self.asset.serial} – "
                               "nicht automatisch geändert (Hardwaretausch?).")
@@ -172,6 +176,63 @@ class _Builder:
             self.add(f"cf:{name}", "ids", label, current, value,
                      [self.update({"custom_fields": {name: str(value)}}, f"{label} setzen")],
                      check_field=f"custom_fields.{name}")
+
+    def vcenter(self):
+        """Cluster und ESXi-Host laut vCenter; bei VMs zusätzlich die virtuellen Disks."""
+        vc = self.asset.sources.get("vcenter") or {}
+        vcfg = self.ctx_vcenter
+        if not vc or vcfg is None:
+            return
+        cluster = vc.get("cluster") or ""
+        current_cluster = (self.obj.get("cluster") or {}).get("name") or ""
+        data: dict = {}
+        steps: list[dict] = []
+        before, after = [current_cluster or "–"], [cluster or current_cluster or "–"]
+        if cluster and cluster != current_cluster:
+            from doku_agent.vcenter_inventory import cluster_steps
+            site_id = comparable(self.obj.get("site")) or (self.nb.find_one("dcim/sites", slug=self.cfg.site) or {}).get("id")
+            steps += cluster_steps(cluster, vcfg, site_id, self.nb, prefix="vc_")
+            data["cluster"] = "$vc_cluster"
+        if self.vm and vc.get("host"):
+            from doku_agent.vcenter_inventory import host_device_for
+            host = host_device_for(self.asset, self.index)
+            current_host = (self.obj.get("device") or {}).get("name") or ""
+            before.append(current_host or "–")
+            if host is None:
+                self.hints.append(f"ESXi-Host {vc['host']} ist nicht in Netbox – VM ohne Host-Zuordnung.")
+                after.append(current_host or "–")
+            elif ((host.get("cluster") or {}).get("name") or "") != (cluster or current_cluster):
+                self.hints.append(f"ESXi-Host {host.get('name')} gehört in Netbox nicht zum Cluster "
+                                  f"{cluster or current_cluster} – Host-Zuordnung folgt nach dessen Abgleich.")
+                after.append(current_host or "–")
+            else:
+                after.append(host.get("name"))
+                if (self.obj.get("device") or {}).get("id") != host["id"]:
+                    data["device"] = host["id"]
+            if "cluster" in data and "device" not in data and self.obj.get("device"):
+                data["device"] = None  # alter Host liegt im alten Cluster – sonst lehnt Netbox ab
+        if data:
+            steps.append(self.update(data, "Cluster/Host setzen"))
+            self.add("placement", "vcenter", "Cluster / Host" if self.vm else "Cluster", " / ".join(before),
+                     " / ".join(after), steps, check_field="cluster")
+        if self.vm and vcfg.virtual_disks and self.asset.disks:
+            self._disks()
+
+    def _disks(self):
+        existing = {d.get("name"): d for d in self.nb.list("virtualization/virtual-disks", virtual_machine_id=self.oid)}
+        for name, size in self.asset.disks:
+            disk = existing.get(name)
+            if disk is None:
+                self.add(f"disk:{name}", "vcenter", f"Disk {name}", "", f"{size} MB",
+                         [{"action": "create", "endpoint": "virtualization/virtual-disks",
+                           "data": {"virtual_machine": self.oid, "name": name, "size": size},
+                           "note": f"Disk {name}"}])
+            elif abs((disk.get("size") or 0) - size) > max(size // 100, 1):  # mehr als 1 % Abweichung
+                self.add(f"disk:{name}", "vcenter", f"Disk {name}", f"{disk.get('size')} MB", f"{size} MB",
+                         [{"action": "update", "endpoint": "virtualization/virtual-disks", "id": disk["id"],
+                           "data": {"size": size}, "note": f"Disk {name} vergrößern/verkleinern"}])
+        for name in set(existing) - {n for n, _ in self.asset.disks}:
+            self.hints.append(f"Disk {name} steht in Netbox, im vCenter aber nicht mehr (nur Hinweis).")
 
     # --- Netzwerk -----------------------------------------------------------
 
@@ -296,9 +357,13 @@ class _Builder:
 
 
 def build_changes(asset: Asset, obj: dict, endpoint: str, how: str, nb: NetboxClient, cfg: NetboxConfig,
-                  index: NetboxIndex) -> tuple[list[Change], list[str]]:
+                  index: NetboxIndex, vcenter: VCenterConfig | None = None) -> tuple[list[Change], list[str]]:
     b = _Builder(asset, obj, endpoint, how, nb, cfg, index)
+    b.ctx_vcenter = vcenter
     enabled = set(cfg.sync)
+    if vcenter and "vcenter" in asset.sources:
+        enabled.add("vcenter")
+        b.vcenter()
     available = index.fields.available.get(endpoint, set())
     if available:
         enabled.add("ids")
@@ -330,7 +395,7 @@ def sync_summary(name: str, vm: bool, changes: list[Change]) -> str:
 def doubtful_match(asset: Asset, obj: dict, how: str) -> bool:
     """Gleiche MAC, andere Seriennummer: vermutlich geteilte MAC (Dock, USB-Adapter) – nicht dieselbe Maschine."""
     nb_serial = norm_serial(obj.get("serial"))
-    return how == "mac" and bool(asset.serial and nb_serial) and nb_serial.upper() != asset.serial.upper()
+    return how == "mac" and bool(asset.serial and nb_serial) and serial_key(nb_serial) != serial_key(netbox_serial(asset.serial))
 
 
 def propose_sync(ctx: Context, asset: Asset, found: tuple[str, int, str], index: NetboxIndex) -> bool:
@@ -344,7 +409,8 @@ def propose_sync(ctx: Context, asset: Asset, found: tuple[str, int, str], index:
         ctx.log.warning("%s: MAC-Treffer auf %s, aber Seriennummer abweichend (%s/%s) – kein Abgleich",
                         asset.name, obj.get("name"), asset.serial, norm_serial(obj.get("serial")))
         return False
-    changes, hints = build_changes(asset, obj, endpoint, how, ctx.netbox, ctx.cfg.netbox, index)
+    changes, hints = build_changes(asset, obj, endpoint, how, ctx.netbox, ctx.cfg.netbox, index,
+                                   ctx.cfg.vcenter if ctx.cfg.vcenter.enabled else None)
     if how == "mac":
         hints.insert(0, "Maschine nur über die MAC-Adresse erkannt – bitte prüfen, ob es wirklich dieselbe ist.")
     if not changes:

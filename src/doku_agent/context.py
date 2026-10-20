@@ -9,7 +9,7 @@ from doku_agent.config import Config
 from doku_agent.egress import EgressGuard
 from doku_agent.store import Store
 
-CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune", "embedder")
+CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune", "embedder", "vcenter")
 
 
 class Context:
@@ -73,6 +73,13 @@ class Context:
         if not self.cfg.intune.enabled:
             raise RuntimeError("Intune ist in der Konfiguration deaktiviert")
         return self._shared("intune", lambda: IntuneClient(self.cfg.intune, self.guard))
+
+    @cached_property
+    def vcenter(self):
+        from doku_agent.connectors.vcenter import VCenterClient
+        if not self.cfg.vcenter.enabled:
+            raise RuntimeError("vCenter ist in der Konfiguration deaktiviert")
+        return self._shared("vcenter", lambda: VCenterClient(self.cfg.vcenter, self.guard))
 
     @cached_property
     def embedder(self):

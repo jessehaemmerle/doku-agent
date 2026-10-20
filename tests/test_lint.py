@@ -36,7 +36,8 @@ def test_dead_links_untagged_and_title_duplicates(lctx, fake_wiki):
     fake_wiki.add("alt/vlans", "VLAN Plan", "Alte Fassung")  # ohne Tags, gleicher Titel (normalisiert)
     summary = lint.run_lint(lctx)
     report = lctx.store.kv_get(lint.REPORT_KEY)
-    assert report["dead_links"] == [{"path": "netzwerk/vlans", "title": "VLAN-Plan", "target": "/de/netzwerk/alt"}]
+    assert [(d["path"], d["target"]) for d in report["dead_links"]] == [("netzwerk/vlans", "/de/netzwerk/alt")]
+    assert report["dead_links"][0]["fix"] is None  # kein eindeutiger Ersatz -> nur Kandidaten
     assert [d["path"] for d in report["untagged"]] == ["alt/vlans"]
     assert report["duplicates"][0]["reason"] == "gleicher Titel"
     assert summary["tote_links"] == 1 and summary["dubletten"] == 1
@@ -128,3 +129,56 @@ def test_lint_view(lctx, fake_wiki):
 
     html = TestClient(create_app(lctx), base_url="http://localhost").get("/wiki-lint", auth=AUTH).text
     assert "/de/fehlt" in html and "Seite A" in html and "Jetzt prüfen" in html
+
+
+
+def test_dead_link_with_unique_replacement_becomes_proposal(lctx, fake_wiki):
+    from doku_agent.apply import apply_proposal
+
+    pid = fake_wiki.add("betrieb/start", "Start", "Siehe [Handbuch](/alt/backup-handbuch#restore) und "
+                        "[rel](notfall).\n\n<!-- doku-agent:begin x -->\n[agent](/alt/backup-handbuch)\n"
+                        "<!-- doku-agent:end x -->\n", tags=["betrieb"])
+    fake_wiki.add("infra/backup-handbuch", "Backup-Handbuch", "Inhalt", tags=["infra"])
+    fake_wiki.add("betrieb/start/notfall-plan", "Notfallplan", "Inhalt", tags=["betrieb"])
+    lctx.cfg.lint.report_page = False
+    lint.run_lint(lctx)
+    report = lctx.store.kv_get(lint.REPORT_KEY)
+    dead = {d["target"]: d for d in report["dead_links"]}
+    assert dead["/de/alt/backup-handbuch"]["fix"] == "/infra/backup-handbuch"
+    assert dead["/de/betrieb/start/notfall"]["fix"] == "/betrieb/start/notfall-plan"  # ähnlicher Pfad
+    prop = lctx.store.get_proposal(dead["/de/alt/backup-handbuch"]["proposal"])
+    content = prop.payload["content"]
+    assert "[Handbuch](/infra/backup-handbuch#restore)" in content and "[rel](/betrieb/start/notfall-plan)" in content
+    assert "[agent](/alt/backup-handbuch)" in content  # Agent-Block bleibt unverändert
+
+    # Seite wird vor der Freigabe von Hand geändert: Korrektur wird auf der neuen Fassung neu berechnet
+    fake_wiki.pages[pid]["content"] += "\nNeuer Absatz von Hand.\n"
+    assert apply_proposal(lctx, prop.id) != "applied"
+    assert apply_proposal(lctx, prop.id) == "applied"
+    assert "Neuer Absatz von Hand." in fake_wiki.pages[pid]["content"]
+    assert "[Handbuch](/infra/backup-handbuch#restore)" in fake_wiki.pages[pid]["content"]
+
+
+def test_untagged_page_gets_tags_of_its_folder(lctx, fake_wiki):
+    fake_wiki.add("netz/a", "A", "x", tags=["netzwerk", "lan"])
+    fake_wiki.add("netz/b", "B", "x", tags=["netzwerk"])
+    c = fake_wiki.add("netz/c", "C", "x")
+    lctx.cfg.lint.report_page = False
+    lint.run_lint(lctx)
+    report = lctx.store.kv_get(lint.REPORT_KEY)
+    entry = next(d for d in report["untagged"] if d["path"] == "netz/c")
+    assert entry["suggested"] == ["netzwerk"]
+    prop = lctx.store.get_proposal(entry["proposal"])
+    assert prop.payload["tags"] == ["netzwerk"] and prop.payload["page_id"] == c
+
+
+def test_resolve_href_like_wikijs():
+    assert lint.resolve_href("/netz/a", "x/y", "de") == "de/netz/a"
+    assert lint.resolve_href("/en/netz/a", "x/y", "de") == "en/netz/a"
+    assert lint.resolve_href("unter", "x/y", "de") == "de/x/y/unter"
+    assert lint.resolve_href("unter", "home", "de") == "de/unter"
+    assert lint.resolve_href("/en", "x", "de") == "en/home"
+    assert lint.resolve_href("/de-at/netz", "x", "de") == "de-at/netz"
+    assert lint.resolve_href("/abc/netz", "x", "de") == "de/abc/netz"
+    for ignored in ("https://example.com", "#anker", "/t/tag", "bild.png", "mailto:a@b.c"):
+        assert lint.resolve_href(ignored, "x", "de") is None

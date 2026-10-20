@@ -2,9 +2,11 @@
 
 Lokaler KI-Agent, der IT-Dokumentation erzeugt und in **Wiki.js** pflegt – mit Fokus auf
 **Netbox** (Maschinen erkennen, eintragen und aktuell halten), **Wazuh** (eigene Regeln, Decoder, Konfiguration, SCA),
-**Intune** (Richtlinien, Profile, Apps, Entra-Gruppen) und **FortiGate** (Regelwerk, NAT, Objekte, Netzwerk, VPN),
-aber auch für beliebige andere Themen aus Stichpunkten und Dateien. Dazu kommen **Fragen ans Wiki** mit
-Quellenangabe und ein **Wiki-Lint**, der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet.
+**Intune** (Richtlinien, Profile, Apps, Entra-Gruppen) und **FortiGate** (Regelwerk, NAT, Objekte, Netzwerk, VPN,
+Prüfung), aber auch für beliebige andere Themen aus Stichpunkten und Dateien. **vCenter** (Cluster, ESXi-Hosts, VMs),
+**Switches** (SNMP/LLDP mit Verkabelung) und die **FortiGate** selbst trägt er in Netbox ein; ein **Abdeckungsbericht**
+zeigt, wo Wazuh, Intune oder Netbox fehlen. Dazu kommen **Fragen ans Wiki** mit Quellenangabe und ein **Wiki-Lint**,
+der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekturen vorschlägt.
 
 - **Komplett lokal:** Das Sprachmodell läuft per [Ollama](https://ollama.com) auf deiner Maschine.
   Der Agent darf nur die konfigurierten Hosts erreichen; alles andere wird vor dem Senden blockiert.
@@ -26,6 +28,8 @@ Quellenangabe und ein **Wiki-Lint**, der tote Links, Dubletten, fehlende Tags un
                      ├──▶ Netbox 4.x   (REST, Discovery + Anlegen nach Freigabe)
                      ├──▶ Wazuh 4.x    (Server-API, nur lesend)
                      ├──▶ FortiGate    (REST-API, nur lesend, optional)
+                     ├──▶ vCenter 7/8  (Automation-API + VI/JSON, nur lesend, optional)
+                     ├──▶ Switches     (SNMP v2c/v3, nur lesend, optional)
                      └──▶ Microsoft Graph (Intune, nur lesend, optional)
 ```
 
@@ -33,19 +37,23 @@ Quellenangabe und ein **Wiki-Lint**, der tote Links, Dubletten, fehlende Tags un
 
 | Bereich | Was passiert | Ergebnis |
 |---|---|---|
-| **Netbox-Discovery** | Liest Geräte aus Intune und Wazuh-Agents (Seriennummer, Hostname, MACs, IPs, OS), führt sie zusammen und gleicht mit Netbox ab | Pro fehlender Maschine ein **Netbox-Plan** (Hersteller, Gerätetyp, Plattform, Gerät/VM, Interfaces, MACs, IPs, primäre IP). Nach Freigabe wird angelegt und automatisch ein **Steckbrief** im Wiki vorgeschlagen |
+| **Netbox-Discovery** | Liest Geräte aus Intune, Wazuh-Agents und vCenter (Seriennummer, Hostname, MACs, IPs, OS), führt sie zusammen und gleicht mit Netbox ab | Pro fehlender Maschine ein **Netbox-Plan** (Hersteller, Gerätetyp, Plattform, Gerät/VM, Interfaces, MACs, IPs, primäre IP). Nach Freigabe wird angelegt und automatisch ein **Steckbrief** im Wiki vorgeschlagen |
 | **Netbox-Abgleich** | Vergleicht bereits eingetragene Maschinen mit Intune und Wazuh | Pro Maschine ein Vorschlag mit **Vorher/Nachher je Änderung**, jede einzeln per Häkchen übernehmbar: fehlende Angaben, OS/Plattform und VM-Ressourcen, Netzwerk (IPs, MACs, primäre IP), Umbenennungen, Wazuh-/Intune-ID |
 | **Netbox-Custom-Fields** | `wazuh_agent_id`, `intune_device_id`, `last_seen` | Maschinen werden zuerst über die IDs wiedererkannt; „zuletzt gesehen“ wird täglich gepflegt. Fehlende Felder schlägt der Agent einmalig zum Anlegen vor |
-| **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces und IPs | Wiki-Seite pro Maschine; der Netbox-Teil wird bei Änderungen aktualisiert |
+| **vCenter** | Cluster, ESXi-Hosts (Hersteller, Modell, Seriennummer) und VMs mit vCPU, RAM, NICs, Gast-IPs und Disks | Teil der Discovery: Cluster und Hosts als Geräte, VMs im Cluster auf ihrem Host, virtuelle Disks einzeln; auch ausgeschaltete VMs |
+| **Switches** | SNMP: Systemdaten, Ports, LLDP-Nachbarn, MAC-Tabelle | Je Switch ein Vorschlag: Gerät, Ports und **Kabel** zu LLDP-Nachbarn und zu Endgeräten an Ports mit genau einer bekannten MAC |
+| **FortiGate → Netbox** | Interfaces, VLANs, IPs der Firewall | Gerät mit Interfaces (LAG-Mitglieder, VLAN-Parent), IP-Adressen samt primärer IP, VLANs und Präfixe; alles einzeln freigebbar |
+| **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces, IPs und Kabeln | Wiki-Seite pro Maschine mit „Verbunden mit“ je Port und den **Firewall-Regeln**, die die Maschine betreffen; der Netbox-Teil wird bei Änderungen aktualisiert |
+| **Abdeckung** | Netbox gegen Wazuh, Intune und vCenter | Seite `infrastruktur/abdeckung`: Maschinen ohne Wazuh-Agent, Clients ohne Intune, Maschinen, die in Netbox fehlen, und Funkstille seit über 30 Tagen |
 | **Wazuh-Regeln/Decoder** | Liest `etc/rules` bzw. `etc/decoders`, parst das XML | Seite pro Datei: Übersicht, Regel-Tabelle (Level, Bedingungen, MITRE) und Erläuterung jeder Regel durch das LLM |
 | **Wazuh-Konfiguration** | `ossec.conf` des Managers und `agent.conf` jeder Gruppe | Zusammenfassung und Einstellungen je Abschnitt; Passwörter, API-Keys und Webhooks werden maskiert |
 | **Wazuh-SCA** | SCA-Ergebnisse aller (oder ausgewählter) Agents | Score je Richtlinie und fehlgeschlagene Prüfungen mit Behebung |
 | **Intune** | Compliance-Richtlinien, Konfigurationsprofile, Settings Catalog, Apps | Seite je Richtlinie mit Beschreibung, Zuweisungen (Gruppenname und Art: dynamisch/zugewiesen) und allen Einstellungen; App-Übersicht |
 | **Entra-Gruppen** | Alle Gruppen, die in Intune-Zuweisungen vorkommen | Übersichtsseite mit Art, dynamischer Regel, Mitgliederzahlen (Benutzer, Geräte, Untergruppen) und allen Zuweisungen je Gruppe |
-| **FortiGate** | Policies, Adressen/Dienste, VIPs/IP-Pools, Interfaces/Zonen/Routen, IPsec | Je Firewall (und VDOM) fünf Seiten: Regeln mit Erklärung jeder Regel durch das LLM, NAT, Objekte mit Verwendung, Netzwerk, VPN. PSKs und Passwörter werden nie übernommen |
+| **FortiGate** | Policies, Adressen/Dienste, VIPs/IP-Pools, Interfaces/Zonen/Routen, IPsec | Je Firewall (und VDOM) sechs Seiten: Regeln mit Erklärung jeder Regel durch das LLM, NAT, Objekte mit Verwendung, Netzwerk, VPN und eine **Prüfung** (verdeckte Regeln, any-any, ohne Logging, Internet ohne Sicherheitsprofil, unbenutzte Objekte). PSKs und Passwörter werden nie übernommen |
 | **Freie Doku** | Stichpunkte und Dateien (TXT, Config, Log, CSV/JSON/XML/YAML, PDF, DOCX) | Der Agent sucht eine passende bestehende Seite (auch inhaltlich über den Suchindex) und ergänzt sie, oder legt eine neue im passenden Bereich an |
 | **Fragen ans Wiki** | Frage in eigenen Worten („Wo läuft der Lizenzserver?“) | Antwort nur aus Wiki-Auszügen, mit nummerierten Quellen und Links; sagt ehrlich, wenn das Wiki die Antwort nicht enthält |
-| **Wiki-Lint** | Ganzes Wiki | Bericht über tote interne Links, mögliche Dubletten, Seiten ohne Tags und veraltete Seiten (Quelle geändert → Aktualisierungs-Vorschlag) |
+| **Wiki-Lint** | Ganzes Wiki | Bericht über tote interne Links, mögliche Dubletten, Seiten ohne Tags und veraltete Seiten (Quelle geändert → Aktualisierungs-Vorschlag); für tote Links mit eindeutigem Ziel und Seiten ohne Tags je ein **Korrekturvorschlag mit Diff** |
 
 ## Installation
 
@@ -73,7 +81,8 @@ dem **Markdown-Editor**. Seiten im Visual Editor (HTML) werden erkannt und über
 
 **Netbox** – eigenen Benutzer `doku-agent` anlegen, Token erzeugen (v1 oder v2 `nbt_…`, beides wird unterstützt).
 Rechte: Anzeigen auf DCIM/IPAM/Virtualization, Anlegen/Ändern für Geräte, Gerätetypen, Hersteller, Rollen,
-Plattformen, Interfaces, MAC-Adressen, IP-Adressen und VMs. Löschen wird nur für das Rollback eines
+Plattformen, Interfaces, MAC-Adressen, IP-Adressen und VMs. Mit vCenter zusätzlich Cluster, Clustertypen und virtuelle
+Disks, mit FortiGate → Netbox VLANs und Präfixe, mit Switches Kabel. Löschen wird nur für das Rollback eines
 fehlgeschlagenen Plans benötigt. Für die Custom Fields braucht der Benutzer einmalig *Custom Field anlegen/ändern*
 (oder du legst die drei Felder selbst an, siehe unten). Alle Änderungen stehen im Netbox-Changelog unter diesem
 Benutzer. In `config.yaml` muss `netbox.site` auf einen existierenden Standort zeigen.
@@ -90,6 +99,19 @@ gelesen und lokal verarbeitet.
 nur lesen darf, und den Agent-Host als *Trusted Host* eintragen. Das Token als `FORTIGATE_TOKEN` in `.env`, die
 Firewall unter `fortigate.devices` eintragen und `fortigate.enabled: true` setzen. Getestet ist das Schema von
 FortiOS 7.x; ältere Versionen ohne einzelne Tabellen (z.B. zentrale SNAT) werden übersprungen.
+
+**vCenter (optional)** – Benutzer (z.B. `doku-agent@vsphere.local`) mit der Rolle **Nur lesen**, auf der obersten
+Ebene vergeben und an untergeordnete Objekte weitergegeben. Zugang als `VCENTER_USER`/`VCENTER_PASSWORD` in `.env`,
+`vcenter.url` setzen und `vcenter.enabled: true`. Cluster, Hosts und VMs kommen aus der Automation-API (ab vCenter
+7.0 U2). Hersteller, Modell und Seriennummer der ESXi-Hosts liefert nur die VI/JSON-API ab **vCenter 8.0 U1**; bei
+älteren Versionen `vijson_release: ""` setzen, dann bleiben diese Angaben leer. Gast-Hostname und IPs gibt es nur bei
+laufenden VMware Tools.
+
+**Switches (optional)** – SNMP-Lesezugang auf jedem Switch: v2c mit einer Read-only-Community (`SNMP_COMMUNITY` in
+`.env`) oder v3 mit Benutzer, `auth_protocol`/`auth_key` und `priv_protocol`/`priv_key`; ACL des Switches auf den
+Agent-Host beschränken. LLDP muss auf den Switches aktiv sein. Die Switches unter `switches.devices` eintragen (je
+Switch eigene Zugangsdaten möglich) und `switches.enabled: true` setzen. Benötigt werden die Standard-MIBs (IF-MIB,
+ENTITY-MIB, LLDP-MIB, BRIDGE-/Q-BRIDGE-MIB), herstellerspezifische MIBs nicht.
 
 Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml` einkommentieren und
 `verify_tls: /config/ca.pem` setzen.
@@ -114,8 +136,10 @@ Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml
 doku-agent check                         # Verbindungen und Allowlist prüfen
 doku-agent run discovery                 # Netbox-Discovery jetzt ausführen
 doku-agent run wazuh_rules               # weitere: wazuh_decoders, wazuh_config, wazuh_sca, intune, fortigate,
-                                         #          netbox_devices, wiki_index, wiki_lint
-doku-agent run fortigate --param device=fw-zentrale --param sections=policies,nat
+                                         #          fortigate_netbox, switches, netbox_devices, wiki_index, wiki_lint
+doku-agent run fortigate --param device=fw-zentrale --param sections=policies,audit
+doku-agent run fortigate_netbox --param device=fw-zentrale   # Firewall in Netbox eintragen/abgleichen
+doku-agent run switches --param host=10.0.0.2                # ein Switch (ohne host: alle)
 doku-agent run netbox_device --param id=42 --param kind=device
 doku-agent doc "Backup der Fileserver" -f notizen.txt [-t infrastruktur/backup/fileserver]
 doku-agent proposals                     # offene Vorschläge
@@ -240,9 +264,56 @@ zu welchem Wazuh-Agent und welchem Intune-Gerät gehört:
   Er erscheint deshalb auch nicht im Wiki-Steckbrief (sonst gäbe es jede Nacht neue Vorschläge). Jede Aktualisierung
   steht wie gewohnt im Netbox-Changelog.
 
+## vCenter
+
+Mit `vcenter.enabled: true` ist das vCenter dritte Quelle der Discovery, neben Wazuh und Intune:
+
+- **Cluster** werden angelegt (Clustertyp `VMware vSphere`, Standort `netbox.site`). **ESXi-Hosts** werden Geräte mit
+  Rolle `hypervisor`, Hersteller, Modell und Seriennummer und gehören zum Cluster.
+- **VMs** kommen in ihren Cluster und, sobald der Host in Netbox steht, auf ihr Gerät (Netbox verlangt, dass Host und
+  VM im selben Cluster liegen; sonst erscheint ein Hinweis). vCPU und RAM stammen aus dem vCenter, nicht aus dem
+  Gastsystem. Ausgeschaltete VMs werden ebenfalls angelegt (`powered_off: false` schaltet das ab).
+- Jede Disk wird als **virtuelle Disk** angelegt (Größe in MB); Netbox bildet daraus die Disk-Summe der VM. Wird eine
+  Disk vergrößert, schlägt der Abgleich die neue Größe vor.
+- Die Zuordnung zu Wazuh und Intune läuft über die Seriennummer: Aus der BIOS-UUID der VM entsteht dieselbe
+  `VMware-42 1a …`-Nummer, die das Gastsystem meldet. Netbox erlaubt nur 50 Zeichen; der Agent speichert sie deshalb
+  ohne Leerzeichen und vergleicht Seriennummern immer ohne Leerzeichen.
+- Bei bekannten VMs schlägt der Abgleich unter „vCenter“ Cluster- bzw. Host-Wechsel (vMotion zwischen Clustern) vor.
+
+## Switches (SNMP, LLDP, MAC-Tabelle)
+
+Der Job `switches` fragt jeden Switch aus `switches.devices` per SNMP ab – herstellerunabhängig über Standard-MIBs –
+und erzeugt je Switch **einen** Vorschlag mit einzeln abwählbaren Änderungen:
+
+| Änderung | Woher |
+|---|---|
+| Gerät | `sysName`, Modell und Seriennummer aus der ENTITY-MIB; Rolle `switch` |
+| Ports | IF-MIB: fehlende Ports mit Name, Beschreibung (`ifAlias`) und Typ nach Geschwindigkeit (z.B. `1000base-t`, `10gbase-x-sfpp`) |
+| Kabel zu Nachbarn | LLDP: Gegenstelle wird über Systemname bzw. Chassis-MAC und Port in Netbox gesucht |
+| Kabel zu Endgeräten | MAC-Tabelle: nur an Ports mit genau einer gelernten MAC (`mac_table_max_macs`), deren Interface in Netbox bekannt ist |
+
+- Uplinks (Ports mit LLDP-Nachbar oder vielen MACs) bekommen nie ein Endgeräte-Kabel. MACs von VMs werden nicht
+  verkabelt.
+- Ist ein Port schon verkabelt, wird nur ein Hinweis angezeigt, falls das Kabel woanders hinführt – bestehende Kabel
+  werden nie geändert oder gelöscht.
+- Abgefragt werden nur die konfigurierten Hosts (UDP 161); andere Ziele blockiert der SNMP-Client wie die HTTP-Allowlist.
+- Der Steckbrief zeigt danach je Port die Spalte „Verbunden mit“.
+
+## Abdeckungsbericht
+
+Nach jeder Discovery vergleicht der Agent Netbox mit den Quellen und schlägt die Seite `infrastruktur/abdeckung` vor
+(ohne Datum, also nur bei geänderten Befunden):
+
+| Prüfung | Regel |
+|---|---|
+| Ohne Wazuh-Agent | Netbox-Maschinen mit Rolle aus `coverage.wazuh_roles` (Standard: `server`, `client`), die kein Wazuh-Agent meldet |
+| Ohne Intune | Rollen aus `coverage.intune_roles` (Standard: `client`), die Intune nicht kennt |
+| Nicht in Netbox | von Wazuh, vCenter oder Intune gemeldet, in Netbox nicht gefunden – mit Status „Vorschlag offen“ oder „ignoriert“ |
+| Funkstille | `last_seen` älter als `coverage.stale_days` (Standard 30 Tage); ausgeschaltete VMs sind gekennzeichnet |
+
 ## Firewall-Dokumentation (FortiGate)
 
-Je Firewall und VDOM entstehen fünf Seiten unter `netzwerk/firewall/<name>/`:
+Je Firewall und VDOM entstehen sechs Seiten unter `netzwerk/firewall/<name>/`:
 
 | Seite | Inhalt |
 |---|---|
@@ -251,12 +322,24 @@ Je Firewall und VDOM entstehen fünf Seiten unter `netzwerk/firewall/<name>/`:
 | `objekte` | Adressen, Adressgruppen, Dienste und Dienstgruppen mit der Spalte „In Regel“ – unbenutzte Objekte fallen sofort auf |
 | `netzwerk` | Interfaces mit VLANs, IPs, Rollen und Verwaltungszugriff, Zonen, statische Routen |
 | `vpn` | IPsec-Tunnel (Gegenstelle, IKE-Version, Verfahren) und Phase-2-Netze; Hinweis auf veraltete Verfahren |
+| `pruefung` | Hygiene-Check: verdeckte Regeln (eine frühere Regel deckt Quelle, Ziel, Dienst und Interfaces vollständig ab), any-any, erlaubt ohne Logging, Internet ohne Sicherheitsprofil, deaktivierte Regeln, unbenutzte Objekte |
 
 - Erklärungen werden in Gruppen zu sechs Regeln erzeugt und nach Inhalt zwischengespeichert. Der erste Lauf bei einigen
   hundert Regeln dauert auf CPU entsprechend (nachts unkritisch), danach werden nur geänderte Regeln neu erklärt.
 - Geheimnisse (PSKs, Passwörter, verschlüsselte `ENC …`-Werte) werden entfernt, bevor Daten das LLM oder das Wiki
   erreichen.
 - Es werden ausschließlich GET-Anfragen gestellt.
+- Verdeckte Regeln erkennt die Prüfung über IP-Netze, Bereiche und Ports. FQDN-, Länder- und ähnliche Objekte gelten
+  nur bei gleichem Namen als abgedeckt, damit keine Regel fälschlich als überflüssig erscheint.
+
+**Firewall-Regeln im Steckbrief:** Der Netbox-Steckbrief einer Maschine listet die Regeln, deren Quelle oder Ziel ihre
+IP enthält – über Host-, Bereichs- und VIP-Objekte sowie Netze bis `/24` (`steckbrief_min_prefix`). Größere Netze und
+„all“ werden ausgelassen, sonst stünde jede Regel auf jeder Seite.
+
+**FortiGate → Netbox:** Der Job `fortigate_netbox` trägt jede Firewall als Gerät (Rolle `firewall`) ein und gleicht
+sie danach ab: physische Interfaces, Aggregate als LAG mit Mitgliedern, VLAN-Interfaces mit Parent und VLAN, IP-Adressen
+(die IP aus der Geräte-URL wird primäre IP), VLANs und Präfixe je Interface-Netz. Für WAN-Interfaces werden keine
+Präfixe angelegt (`netbox_skip_roles`). Ein Vorschlag je Firewall, jede Änderung einzeln abwählbar.
 
 ## Fragen ans Wiki
 
@@ -287,6 +370,16 @@ passendsten Abschnitte und lässt das Sprachmodell **nur auf deren Grundlage** a
 Der Bericht steht unter *Wiki-Lint* und zusätzlich als Seite `wartung/wiki-lint` (als Vorschlag, ohne Datum – sie ändert
 sich nur, wenn sich die Befunde ändern).
 
+**Korrekturvorschläge** (`lint.fix_links`, `lint.suggest_tags`):
+
+- **Tote Links:** Gibt es genau ein plausibles Ziel, entsteht je Seite ein Vorschlag mit Diff, der die Links ersetzt
+  (Anker wie `#restore` bleiben erhalten). Gesucht wird nach einer Seite mit gleichem Namen an anderer Stelle, nach einem
+  sehr ähnlichen Pfad und über den Suchindex. Ist das Ziel nicht eindeutig, nennt der Bericht nur die Kandidaten.
+- Links in Code-Blöcken und in Blöcken des Agents werden nicht angefasst. Wurde die Seite vor der Freigabe geändert,
+  wird die Korrektur auf der neuen Fassung neu angewendet.
+- **Seiten ohne Tags:** Vorschlag mit den Tags, die die Seiten im selben Ordner tragen, sonst die der inhaltlich
+  ähnlichsten Seiten.
+
 ## Modell und Leistung (16 GB RAM, nur CPU)
 
 | Modell | RAM | Einsatz |
@@ -303,8 +396,8 @@ nur Erklärungen, Beschreibungen und freie Texte. So bleiben Fakten korrekt, auc
 ## Datenschutz und Sicherheit
 
 - **Egress-Allowlist:** Jeder HTTP-Client des Agents prüft vor dem Senden, ob der Ziel-Host konfiguriert ist (Wiki,
-  Ollama, Netbox, Wazuh, FortiGates, bei Intune `login.microsoftonline.com` und `graph.microsoft.com`). Weiterleitungen werden
-  nicht verfolgt, Proxy-Variablen werden standardmäßig ignoriert.
+  Ollama, Netbox, Wazuh, FortiGates, vCenter, bei Intune `login.microsoftonline.com` und `graph.microsoft.com`). Weiterleitungen werden
+  nicht verfolgt, Proxy-Variablen werden standardmäßig ignoriert. SNMP geht nur an die Switches aus `switches.devices`.
 - **Ollama ohne Internet:** Der Ollama-Container hängt nur am internen Netz `llm`. Zusätzlich ist
   `OLLAMA_NO_CLOUD=1` gesetzt (keine Cloud-Modelle, keine Websuche). Nur der einmalige `ollama-pull` hat Internet.
 - **Geheimnisse:** Tokens nur in `.env` (nicht eingecheckt). In Wazuh-Konfigurationen, Intune-Einstellungen und
@@ -321,7 +414,7 @@ nur Erklärungen, Beschreibungen und freie Texte. So bleiben Fakten korrekt, auc
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest                      # Unit- und Komponententests (Fakes für Wiki.js, Netbox, Graph, FortiGate, LLM)
+.venv/bin/pytest                      # Unit- und Komponententests (Fakes für Wiki.js, Netbox, Graph, FortiGate, vCenter, LLM)
 ```
 
 Integrationstests gegen echte Test-Instanzen (werden ohne Variablen übersprungen; nie gegen Produktion laufen lassen,
@@ -332,8 +425,12 @@ DOKU_IT_WIKI_URL=http://127.0.0.1:3000 DOKU_IT_WIKI_KEY=… \
 DOKU_IT_NETBOX_URL=http://127.0.0.1:8000 DOKU_IT_NETBOX_TOKEN=nbt_… \
 DOKU_IT_WAZUH_URL=https://127.0.0.1:55000 DOKU_IT_WAZUH_USER=… DOKU_IT_WAZUH_PASSWORD=… DOKU_IT_WAZUH_INSECURE=1 \
 DOKU_IT_OLLAMA_URL=http://127.0.0.1:11434 \
+DOKU_IT_SNMP_HOST=127.0.0.1 DOKU_IT_SNMP_PORT=1161 \
 .venv/bin/pytest tests/test_integration_*.py
 ```
+
+Der Switch-Test braucht einen SNMP-Simulator (z.B. `snmpsim`, Community `public`) mit den Daten des Switches
+`sw-core01`, die im Kopf von `tests/test_integration_switches.py` beschrieben sind, und zusätzlich Netbox.
 
 Aufbau und Entscheidungen: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
 
@@ -344,6 +441,11 @@ Aufbau und Entscheidungen: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
   wird nicht gepflegt (`last_seen` zeigt aber, wann eine Maschine zuletzt gemeldet hat). Wiki-Seiten werden nach einer
   Umbenennung nicht verschoben (nur der Titel ändert sich).
 - Firewalls: nur FortiGate (FortiOS 7.x). SSL-VPN, Security-Profile im Detail und SD-WAN werden nicht dokumentiert.
+  Die Prüfung erkennt verdeckte Regeln nur über auflösbare Objekte und berücksichtigt keine Zeitpläne und Benutzergruppen.
+- vCenter: Ressourcenpools, Ordner, Datastores und Portgruppen werden nicht übernommen; Hosts ohne Cluster bekommen keinen
+  Cluster. Mangels Testinstanz ist die vCenter-Anbindung nur gegen Fakes nach der dokumentierten API getestet.
+- Switches: VLAN-Zuordnung der Ports, Port-Channels und Stacks werden nicht gepflegt. Kabel entstehen nur, wenn die
+  Gegenstelle in Netbox schon ein passendes Interface hat.
 - Fragen ans Wiki kennen nur Wiki-Inhalte, keine Live-Daten aus Netbox oder Wazuh.
 - Wazuh-Alarm-Auswertungen aus dem Indexer sind nicht enthalten (bewusst ausgeklammert).
 - Bilder bzw. Screenshots in Aufträgen werden nicht ausgewertet (Vision-Modell auf CPU zu langsam).

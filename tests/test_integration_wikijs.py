@@ -123,3 +123,34 @@ def test_semantic_index_against_real_wiki(real_ctx):
     hits = semantic.search(real_ctx, f"Wo läuft FlexLM-{run}?", k=1)
     assert hits[0].path == path and hits[0].heading == "Lizenzen"
     assert semantic.index_wiki(real_ctx)["aktualisiert"] == 0
+
+
+def test_lint_fix_against_real_wiki(real_ctx):
+    from doku_agent import lint
+    from doku_agent.apply import apply_proposal
+
+    run = uuid.uuid4().hex[:6]
+    base = f"doku-agent-test/fix-{run}"
+    wiki = real_ctx.wiki
+    _create(wiki, f"{base}/neu/handbuch-{run}", "Handbuch", "Inhalt")
+    src = _create(wiki, f"{base}/start", "Start", f"Siehe [Handbuch](/{base}/alt/handbuch-{run}#teil) bitte.")
+    real_ctx.cfg.lint.report_page = False
+    for _ in range(10):
+        lint.run_lint(real_ctx)
+        report = real_ctx.store.kv_get(lint.REPORT_KEY)
+        dead = [d for d in report["dead_links"] if d["path"] == f"{base}/start"]
+        if dead:
+            break
+        time.sleep(1)
+    assert dead[0]["fix"] == f"/{base}/neu/handbuch-{run}"
+    assert apply_proposal(real_ctx, dead[0]["proposal"]) == "applied"
+    page = wiki.get_page(src)
+    assert f"[Handbuch](/{base}/neu/handbuch-{run}#teil)" in page.content
+    for _ in range(10):  # Wiki.js aktualisiert die Linkliste beim Rendern
+        real_ctx.__dict__.pop("conventions", None)
+        lint.run_lint(real_ctx)
+        if not [d for d in real_ctx.store.kv_get(lint.REPORT_KEY)["dead_links"] if d["path"] == f"{base}/start"]:
+            break
+        time.sleep(1)
+    else:
+        pytest.fail("toter Link nach der Korrektur weiterhin gemeldet")

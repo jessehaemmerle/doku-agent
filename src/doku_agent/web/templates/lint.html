@@ -27,7 +27,9 @@
 <h2>Tote Links <span class="muted">({{ report.dead_links|length }})</span></h2>
 <div class="list">
   {% for d in report.dead_links %}
-  <div><span class="id">–</span><span class="title">{{ page(d.path, d.title) }}</span><code>{{ d.target }}</code></div>
+  <div><span class="id">–</span><span class="title">{{ page(d.path, d.title) }}<span class="sub"><code>{{ d.target }}</code>
+    {% if d.fix %} → <code>{{ d.fix }}</code>{% elif d.candidates %} – Kandidaten: {% for c in d.candidates %}<code>/{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</span></span>
+    {% if d.proposal %}<a href="/vorschlaege/{{ d.proposal }}">Korrektur prüfen</a>{% else %}<span></span>{% endif %}</div>
   {% else %}<p class="empty">Keine toten Links.</p>{% endfor %}
 </div>
 
@@ -41,7 +43,8 @@
 <h2>Seiten ohne Tags <span class="muted">({{ report.untagged|length }})</span></h2>
 <div class="list">
   {% for d in report.untagged %}
-  <div><span class="id">–</span><span class="title">{{ page(d.path, d.title) }}</span><span></span></div>
+  <div><span class="id">–</span><span class="title">{{ page(d.path, d.title) }}{% if d.suggested %}<span class="sub">Vorschlag: {{ d.suggested|join(', ') }}</span>{% endif %}</span>
+    {% if d.proposal %}<a href="/vorschlaege/{{ d.proposal }}">Tags prüfen</a>{% else %}<span></span>{% endif %}</div>
   {% else %}<p class="empty">Alle Seiten haben Tags.</p>{% endfor %}
 </div>
 

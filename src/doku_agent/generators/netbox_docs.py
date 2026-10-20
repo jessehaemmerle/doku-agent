@@ -7,7 +7,9 @@ from doku_agent.context import Context
 from doku_agent.pages import Block, PageDraft, propose_page
 
 
-def _n(obj: dict | None, key: str = "name") -> str:
+def _n(obj: dict | str | None, key: str = "name") -> str:
+    if isinstance(obj, str):  # schon aufgelöster Wert
+        return obj
     return (obj or {}).get(key) or ""
 
 
@@ -64,12 +66,27 @@ def document_object(ctx: Context, kind: str, obj_id: int) -> int | None:
     ]
     if_rows = [[i.get("name"), _n(i.get("type"), "label"), _mac(i),
                 ", ".join(ips_by_iface.get(i.get("id"), [])), i.get("description") or ""] for i in interfaces]
+    headers = ["Interface", "Typ", "MAC", "IP-Adressen", "Beschreibung"]
+    if any(i.get("link_peers") for i in interfaces):  # Spalte nur, wenn verkabelt (sonst keine Schein-Änderung)
+        headers.append("Verbunden mit")
+        for row, i in zip(if_rows, interfaces):
+            row.append(", ".join(f"{_n(p.get('device'))} {p.get('name', '')}".strip()
+                                 for p in i.get("link_peers") or []))
     blocks = [
         Block("netbox-device", "Steckbrief", markdown.table(["Eigenschaft", "Wert"], rows)),
-        Block("netbox-interfaces", "Netzwerk",
-              markdown.table(["Interface", "Typ", "MAC", "IP-Adressen", "Beschreibung"], if_rows)
-              if if_rows else "_Keine Interfaces in Netbox._"),
+        Block("netbox-interfaces", "Netzwerk", markdown.table(headers, if_rows) if if_rows
+              else "_Keine Interfaces in Netbox._"),
     ]
+    fw = ctx.cfg.fortigate
+    if fw.enabled and fw.steckbrief_rules and fw.devices:
+        from doku_agent.generators.fortigate_docs import rules_for_machine
+        hosts = [(ip.get("address") or "").split("/")[0] for ip in ips]
+        rows = rules_for_machine(ctx, hosts) if hosts else []
+        if rows is not None:  # Firewall nicht lesbar: bestehenden Abschnitt unverändert lassen
+            blocks.append(Block("netbox-firewall", "Firewall-Regeln", markdown.table(
+                ["Firewall", "Regel", "Richtung", "Gegenseite", "Dienst", "Aktion", "Über Objekt"], rows)
+                if rows else "_Keine Firewall-Regel betrifft diese Maschine gezielt (nur über große Netze oder "
+                             "'beliebig')._"))
     if obj.get("comments"):
         blocks.append(Block("netbox-comments", "Kommentare aus Netbox", obj["comments"]))
     return propose_page(ctx, PageDraft(

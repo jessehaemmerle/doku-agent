@@ -21,6 +21,12 @@
 | Netbox-Custom-Fields (20.10.2026) | Agent legt Felder nach Freigabe an; IDs mit Freigabe; `last_seen` automatisch (einzige Ausnahme) | `netbox_fields.py`, ID-Treffer vor Seriennummer/Name/MAC in `NetboxIndex.find`, Kategorie „Kennung“ |
 | Embeddings (20.10.2026) | `qwen3-embedding:0.6b` über dasselbe Ollama; Fragen in UI und CLI | `embeddings.py`, `semantic.py` (Index in SQLite, numpy-Suche), freie Aufträge nutzen semantische Kandidaten |
 | Wiki-Lint (20.10.2026) | Bericht in UI und als Wiki-Seite; veraltete Seiten → Aktualisierungs-Vorschlag | `lint.py`, Zuordnung Seite ↔ Quelle über `page-for:<stable_id>` |
+| Lint-Korrekturen (20.10.2026) | tote Links und fehlende Tags als Vorschlag mit Diff | `lint.suggest_target`/`suggest_tags`, `markdown.replace_links` (nur außerhalb von Code und Agent-Blöcken), bei Konflikt in `apply.py` neu angewendet |
+| vCenter (20.10.2026) | Cluster + VMs, ESXi-Hosts als Geräte, auch ausgeschaltete VMs, Disks einzeln | `connectors/vcenter.py` (Automation-API + VI/JSON für Host-Hardware), `vcenter_inventory.py` als dritte Discovery-Quelle, Kategorie „vCenter“ im Abgleich |
+| Switches (20.10.2026) | SNMP, herstellerunabhängig; Kabel aus LLDP + MAC-Tabelle, Endgeräte nur bei genau einer MAC am Port | `connectors/snmp.py` (pysnmp, Allowlist), `switches.py`, ein Vorschlag je Switch |
+| FortiGate → Netbox (20.10.2026) | Gerät + Interfaces, IPs, VLANs, Präfixe, alles mit Freigabe | `fortigate_netbox.py`, Job `fortigate_netbox` |
+| Abdeckung (20.10.2026) | Wazuh auf Servern und Clients, Intune auf Clients, Netbox für alles, Funkstille 30 Tage | `coverage.py`, nach jeder Discovery, Seite ohne Datum |
+| Firewall im Steckbrief / Prüfung (20.10.2026) | Regeln über Host-, Bereichs-, VIP-Objekte und Netze bis /24; Hygiene-Check als eigene Seite je Firewall | `fortigate_docs.machine_rules`, `fortigate_docs.audit` (Intervall-Mengen für Adressen und Dienste) |
 
 ## Module
 
@@ -36,13 +42,17 @@ src/doku_agent/
   store.py         SQLite: Vorschläge, Jobs, Ignorierliste, Cache (LLM-Texte nach Eingabe-Hash)
   apply.py         Freigegebene Vorschläge ausführen, Konflikterkennung, Neuberechnung
   netbox_plan.py   Plan-Validierung (Endpunkt-/Aktions-Allowlist, Referenzen), Ausführung mit Rollback (Löschen + Feld-Restore)
-  discovery.py     Intune/Wazuh-Inventar, Zusammenführung, Netbox-Index, Plan für neue Maschinen
+  discovery.py     Intune/Wazuh/vCenter-Inventar, Zusammenführung, Netbox-Index, Plan für neue Maschinen
+  vcenter_inventory.py  vCenter-Hosts und VMs als Assets, Cluster-Schritte
+  switches.py      SNMP-Daten -> Switch, Ports und Kabel (LLDP, MAC-Tabelle) als Änderungen
+  fortigate_netbox.py   FortiGate -> Gerät, Interfaces, IPs, VLANs, Präfixe als Änderungen
+  coverage.py      Abdeckungsbericht (Wazuh, Intune, Netbox, Funkstille)
   netbox_sync.py   Abweichungen bekannter Maschinen als einzeln freigebbare Änderungen (Vorher/Nachher, Abhängigkeiten)
   netbox_fields.py Custom Fields des Agents: Status/Anlage-Vorschlag, Werte, last_seen
   embeddings.py    Ollama /api/embed
   semantic.py      Suchindex (Abschnitte je Überschrift), Suche, Fragen mit Quellen
-  lint.py          Wiki-Lint: tote Links, Dubletten, ohne Tags, veraltete Seiten (Neuberechnung über stable_id)
-  connectors/      netbox.py, wazuh.py, intune.py, fortigate.py
+  lint.py          Wiki-Lint: tote Links, Dubletten, ohne Tags, veraltete Seiten (Neuberechnung über stable_id), Korrekturen
+  connectors/      netbox.py, wazuh.py, intune.py, fortigate.py, vcenter.py, snmp.py
   generators/      wazuh_docs, intune_docs, netbox_docs, fortigate_docs, freeform, common (Maskierung, Cache, Stil)
   jobs.py          Job-Registry, Job-Log, Worker-Thread
   scheduler.py     Tages-Zeitplan
@@ -65,6 +75,11 @@ Datenfluss eines Laufs: **Quelle → Generator → `PageDraft` → `propose_page
 | Graph Gruppen | Microsoft Learn | `/groups/{id}/transitiveMembers/microsoft.graph.{user,device,group}/$count` mit `ConsistencyLevel: eventual`, Antwort `text/plain`; Untergruppen bei M365-Gruppen → 400 |
 | Netbox Custom Fields | `extras/api/customfields.py`, Serializer @ main | `object_types` als `"dcim.device"`; PATCH von `custom_fields` wird mit bestehenden Werten zusammengeführt; unbekannte Felder werden abgelehnt; neu: `status` (nur `active` ist nutzbar) |
 | Wiki.js Links | `server/graph/resolvers/page.js`, `modules/rendering/html-core/renderer.js` @ v2.5.315 | `pages.links(locale)` liefert je Seite alle internen Links als `locale/pfad`, auch auf fehlende Seiten; relative Links gelten relativ zur Seite |
+| vSphere Automation API | API-Referenz auf developer.broadcom.com | `POST /api/session` (Basic) → Token als JSON-String, Header `vmware-api-session-id`; `/api/vcenter/{cluster,host,vm}` mit Filtern `clusters`/`hosts`; Gastdaten (`guest/identity`, `guest/networking/interfaces`) ohne VMware Tools → 503 |
+| vSphere VI/JSON | Referenz ab 8.0 U1 | `ServiceInstance/ServiceInstance/content` → `sessionManager`, `SessionManager/{id}/Login`; `HostSystem/{id}/hardware` → `systemInfo` (vendor, model, serialNumber, otherIdentifyingInfo) |
+| Netbox Virtualisierung/IPAM/Kabel | Serializer und Validierung @ 4.7.2 (Image) | `virtual-disks.size` in MB, Disk-Summe der VM wird berechnet; Cluster und Prefix mit `scope_type`/`scope_id` ab 4.2; VM-Device muss im VM-Cluster liegen; Kabel mit `a_terminations`/`b_terminations` als `{object_type, object_id}`; `serial` max. 50 Zeichen |
+| SNMP | pysnmp 7.1 (asyncio-API), RFC-MIBs | `bulk_walk_cmd` mit `lexicographicMode=False`; IF-MIB, ENTITY-MIB (Chassis = Klasse 3), LLDP-MIB (`lldpRem*`, Index `timeMark.localPort.index`), Q-BRIDGE `dot1qTpFdbPort` mit Fallback auf BRIDGE-MIB |
+| FortiOS Status | Fortinet-Ansible-Collection | `monitor/system/status` → `model_name`/`model_number`; `system/interface` mit `type`, `vlanid`, `interface` (Parent), `member`, `secondaryip`, `role` |
 
 ## Ende-zu-Ende geprüft (19.10.2026)
 
@@ -125,9 +140,40 @@ Discovery ab; Erklärungen der Firewall-Regeln wurden je Gruppe statt je Regel z
 hätte alle folgenden neu erklären lassen); Einzel- und Gesamtlauf erzeugten unterschiedliche NAT- bzw. Gruppen-Seiten. In der Sandbox brauchte das erste Laden von `qwen3:8b` wegen langsamer Platte länger als Ollamas
 Ladezeitlimit – auf echter Hardware mit SSD kein Thema.
 
+## Inventar-Erweiterungen geprüft (20.10.2026)
+
+Gegen Netbox 4.7.2 und Wiki.js 2.5.315, Switches über einen SNMP-Simulator (`snmpsim`, v2c) mit einer Aufzeichnung
+nach Standard-MIBs:
+
+| Ablauf | Ergebnis |
+|---|---|
+| Switch per SNMP → Netbox | Switch mit Seriennummer und Modell aus der ENTITY-MIB, alle Ports, Kabel zum LLDP-Nachbarn und zum Endgerät über die MAC-Tabelle; geprüft über `link_peers` in Netbox; zweiter Lauf ohne neue Änderungen |
+| FortiGate (Fake) → echtes Netbox | Gerät, LAG mit Mitgliedern, VLAN-Interfaces mit Parent und VLAN, IPs mit primärer IP, Präfixe mit `scope`; WAN ohne Präfix |
+| vCenter (Fake) → echtes Netbox | Cluster, ESXi-Host im Cluster, VM im Cluster auf dem Host, virtuelle Disks; Netbox berechnet die Disk-Summe; vergrößerte Disk → Änderungsvorschlag |
+| Lint-Korrektur → Wiki.js | toter Link ersetzt, Anker erhalten, nächster Lint ohne toten Link |
+
+Dabei gefunden und behoben: Die aus der BIOS-UUID gebildete VMware-Seriennummer ist 54 Zeichen lang, Netbox erlaubt nur
+50 – das Anlegen jeder VM scheiterte. Seriennummern werden jetzt ohne Leerzeichen gespeichert und überall ohne
+Leerzeichen verglichen (`netbox_serial`, `serial_key`); ein Regressionstest sichert das ab. Die vCenter-Anbindung ist
+mangels Testinstanz nur gegen Fakes nach der dokumentierten API geprüft, die FortiGate weiterhin ebenso.
+
+Das Code-Review dieser Runde fand zehn Punkte; acht sind behoben und mit Tests abgesichert: Das IPv6-Objekt „all“
+überdeckte das gleichnamige IPv4-Objekt, sodass die Prüfung keine any-any-Regeln fand (IPv4- und IPv6-Objekte werden
+jetzt getrennt aufgelöst); LAG-Mitglieder, die alphabetisch vor ihrem neuen Aggregat stehen, bekamen keinen LAG;
+negierte Adressen („alles außer srv01“) erschienen im Steckbrief als Regel für srv01; mehrfach vorhandene IPs und
+Präfixe (z.B. in mehreren VRFs) galten als fehlend; ein Switch bzw. eine Firewall ohne Änderungen zählte bei einem
+Fehler an einem anderen Gerät als gescheitert; LLDP-Kabel wurden von beiden Switches vorgeschlagen; der
+Dedup-Schlüssel von Maschinen mit Leerzeichen in der Seriennummer hätte sich geändert (Ignorierliste); der
+Abdeckungsbericht fragte offene Vorschläge je Maschine ab. Nicht geändert: Zweibuchstabige erste Pfadsegmente gelten
+wie in Wiki.js als Sprache (Wiki.js sperrt solche Pfade für Seiten); virtuelle Disks setzen Netbox 4.0 voraus, das
+ohnehin Mindestversion ist.
+
 ## Bewusst nicht umgesetzt
 
-- Status-Pflege (z.B. offline nach längerer Funkstille) und Löschen in Netbox; `last_seen` liefert die Grundlage dafür.
+- Status-Pflege (z.B. offline nach längerer Funkstille) und Löschen in Netbox; `last_seen` und der Abdeckungsbericht
+  liefern die Grundlage dafür.
+- Ändern oder Löschen bestehender Kabel; abweichende Kabel erscheinen nur als Hinweis.
+- VLAN-Zuordnung von Switch-Ports, Ressourcenpools, Datastores und Portgruppen aus dem vCenter.
 - Wazuh-Alarmberichte aus dem Indexer.
 - Wiki.js 3.x und Visual-Editor-Seiten.
 - Bildauswertung.

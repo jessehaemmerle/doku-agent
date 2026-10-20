@@ -62,3 +62,13 @@ class FortiGateClient:
             results = results[0] if results else {}
         return {"hostname": results.get("hostname") or self.dev.name, "version": data.get("version", ""),
                 "build": data.get("build", ""), "serial": data.get("serial", "")}
+
+    def model(self) -> str:
+        """Modellbezeichnung (z.B. "FortiGate-60F") aus dem Monitor-Endpunkt; leer, wenn nicht lesbar."""
+        try:
+            results = self._get("monitor/system/status").get("results") or {}
+        except FortiGateError:
+            return ""
+        if results.get("model_name") and results.get("model_number"):
+            return f"{results['model_name']}-{results['model_number']}"
+        return results.get("model") or ""

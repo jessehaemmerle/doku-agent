@@ -21,7 +21,9 @@ from doku_agent.connectors.netbox import NetboxClient, NetboxError
 ALLOWED_ENDPOINTS = {
     "dcim/manufacturers", "dcim/device-types", "dcim/device-roles", "dcim/platforms", "dcim/devices",
     "dcim/interfaces", "dcim/mac-addresses", "ipam/ip-addresses",
-    "virtualization/virtual-machines", "virtualization/interfaces",
+    "virtualization/virtual-machines", "virtualization/interfaces", "virtualization/virtual-disks",
+    "virtualization/clusters", "virtualization/cluster-types",
+    "ipam/vlans", "ipam/prefixes", "dcim/cables",
     "extras/custom-fields",  # nur für das einmalige Anlegen der Agent-Felder
 }
 ACTIONS = {"create", "ensure", "update"}

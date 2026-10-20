@@ -35,6 +35,7 @@ wiki:
     intune_groups: clients/intune/gruppen             # Entra-Gruppen mit Mitgliederzahlen und Zuweisungen
     fortigate: netzwerk/firewall/{device}/{section}   # {section}: regeln, nat, objekte, netzwerk, vpn; optional {vdom}
     wiki_lint: wartung/wiki-lint                      # Bericht des Wiki-Lint
+    coverage: infrastruktur/abdeckung                 # Abdeckungsbericht (nach jeder Discovery)
   tags:
     netbox_device: [netbox]
     wazuh_rules: [wazuh]
@@ -46,6 +47,7 @@ wiki:
     intune_groups: [intune]
     fortigate: [firewall, fortigate]
     wiki_lint: []
+    coverage: [netbox]
   convention_sample_pages: 5
 
 netbox:
@@ -106,7 +108,46 @@ fortigate:
       token: ${FORTIGATE_TOKEN:-}
       verify_tls: true         # oder Pfad zur internen CA
       vdoms: [root]            # mehrere VDOMs: je VDOM eigene Seiten
-  include: [policies, nat, objects, network, vpn]
+      netbox_site: ""          # Standort in Netbox (leer = netbox.site)
+  include: [policies, nat, objects, network, vpn, audit]   # audit = Prüfseite (verdeckte Regeln, any-any, ...)
+  # Job fortigate_netbox: Firewall als Gerät mit Interfaces, IPs, VLANs, Präfixen (alles mit Freigabe)
+  netbox_sync: [device, interfaces, ips, vlans, prefixes]
+  netbox_role: firewall
+  netbox_skip_roles: [wan]     # für WAN-Interfaces keine Präfixe anlegen
+  steckbrief_rules: true       # Steckbrief zeigt Regeln, die die Maschine betreffen …
+  steckbrief_min_prefix: 24    # … über Host-, Bereichs-, VIP- und Netzobjekte bis zu dieser Größe
+
+vcenter:
+  enabled: false
+  url: https://vcenter.example.local
+  username: ${VCENTER_USER:-}  # Benutzer mit Rolle "Nur lesen"
+  password: ${VCENTER_PASSWORD:-}
+  verify_tls: true
+  vijson_release: "8.0.1.0"    # VI/JSON für Host-Hardware (ab vCenter 8.0 U1); "" = ohne Hersteller/Seriennummer
+  hosts: true                  # ESXi-Hosts als Geräte (Rolle host_role)
+  host_role: hypervisor
+  powered_off: true            # ausgeschaltete VMs auch anlegen
+  virtual_disks: true          # Disks einzeln als virtuelle Disks
+  cluster_type: VMware vSphere
+
+switches:
+  enabled: false
+  snmp:                        # Standard für alle Switches (je Switch überschreibbar)
+    version: "2c"              # oder "3"
+    community: ${SNMP_COMMUNITY:-}
+    # v3: user, auth_protocol (sha256 …), auth_key, priv_protocol (aes …), priv_key
+  devices:
+    - host: 10.0.0.2           # nur diese Hosts werden per SNMP (UDP 161) abgefragt
+      name: ""                 # leer = sysName
+  netbox_role: switch
+  mac_table: true              # Endgeräte über die MAC-Tabelle verkabeln …
+  mac_table_max_macs: 1        # … nur an Ports mit so vielen gelernten MACs (keine Uplinks)
+
+coverage:
+  enabled: true                # Abdeckungsbericht nach jeder Discovery
+  wazuh_roles: [server, client]   # Netbox-Rollen, die einen Wazuh-Agent haben müssen
+  intune_roles: [client]
+  stale_days: 30
 
 # Lokale Embeddings (gleiches Ollama) für Fragen ans Wiki und bessere Seitenwahl bei freien Aufträgen
 embeddings:
@@ -121,6 +162,8 @@ lint:
   refresh_stale: true          # veraltete Seiten neu vorschlagen
   duplicate_threshold: 0.93    # ab dieser inhaltlichen Ähnlichkeit gelten Seiten als mögliche Dubletten
   exclude_paths: []            # z.B. [archiv]
+  fix_links: true              # tote Links: eindeutigen Ersatz als Vorschlag mit Diff
+  suggest_tags: true           # Seiten ohne Tags: Tags aus dem Ordner bzw. ähnlichen Seiten vorschlagen
 
 # Nächtliche Läufe. Ergebnisse landen als Vorschläge in der Freigabe-Liste.
 schedule:
@@ -131,6 +174,8 @@ schedule:
   - {job: wazuh_sca, at: "03:30", days: [0]}   # nur montags
   # - {job: intune, at: "04:00"}
   # - {job: fortigate, at: "04:30"}
+  # - {job: fortigate_netbox, at: "04:45"}
+  # - {job: switches, at: "01:00"}
   - {job: wiki_index, at: "05:30"}             # Suchindex für Fragen ans Wiki
   - {job: wiki_lint, at: "06:00", days: [6]}   # sonntags
 

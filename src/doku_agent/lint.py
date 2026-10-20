@@ -11,12 +11,15 @@
 
 from __future__ import annotations
 
+import functools
+import re
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 from doku_agent import markdown
 from doku_agent.context import Context
-from doku_agent.pages import Block, PageDraft, propose_page
-from doku_agent.wiki import normalize_path
+from doku_agent.pages import Block, PageDraft, propose_page, sha
+from doku_agent.wiki import PageInfo, normalize_path
 
 REPORT_KEY = "lint:report"
 REPORT_ID = "lint:report"
@@ -99,8 +102,108 @@ def refresh(ctx: Context, stable_id: str) -> int | None:
     raise Unsupported(stable_id)
 
 
+# --- Korrekturvorschläge -----------------------------------------------------------
+
+# wie localeSegmentRegex in Wiki.js (server/helpers/page.js); solche Pfade sind dort für Seiten gesperrt
+_LOCALE = re.compile(r"^[a-z]{2}(-[a-z]{2})?$", re.I)
+
+
+def resolve_href(href: str, page_path: str, locale: str) -> str | None:
+    """Linkziel so auflösen wie Wiki.js beim Rendern ('locale/pfad'); None für externe Links,
+    Anker, Dateien und Systempfade."""
+    if not href or href.startswith("#") or "://" in href or href.startswith(("mailto:", "tel:")) or "." in href:
+        return None
+    path = href.split("#")[0].split("?")[0]
+    if re.match(r"^/[a-z](/|$)", path, re.I):
+        return None
+    if not path.startswith("/"):
+        path = f"/{path}" if page_path == "home" else f"/{page_path}/{path}"
+    parts = [p for p in path.strip("/").split("/") if p and p not in (".", "..")]
+    loc = parts.pop(0) if parts and _LOCALE.match(parts[0]) else locale
+    return f"{loc}/{'/'.join(parts) or 'home'}"
+
+
+def suggest_target(ctx: Context, dead: str, pages: list[PageInfo]) -> tuple[str | None, list[str], str]:
+    """Ersatz für ein totes Linkziel: (eindeutiger Pfad oder None, Kandidaten, Begründung)."""
+    _, _, path = dead.partition("/")
+    last = path.rsplit("/", 1)[-1].lower()
+    same_name = [p for p in pages if p.path.rsplit("/", 1)[-1].lower() == last]
+    if len(same_name) == 1:
+        return same_name[0].path, [same_name[0].path], "gleicher Seitenname"
+    ratios = sorted(((SequenceMatcher(None, path, p.path).ratio(), p.path) for p in pages), reverse=True)
+    if ratios and ratios[0][0] >= 0.85 and (len(ratios) == 1 or ratios[0][0] - ratios[1][0] >= 0.1):
+        return ratios[0][1], [ratios[0][1]], f"ähnlicher Pfad ({ratios[0][0]:.2f})"
+    candidates = [p for r, p in ratios[:3] if r >= 0.5]
+    try:
+        from doku_agent import semantic
+        if semantic.is_ready(ctx):
+            by_id = {p.id: p.path for p in pages}
+            hits = [(by_id[pid], score) for pid, score in
+                    semantic.similar_pages(ctx, re.sub(r"[/_-]+", " ", path), limit=3) if pid in by_id]
+            if hits and hits[0][1] >= 0.75 and (len(hits) == 1 or hits[0][1] - hits[1][1] >= 0.08):
+                return hits[0][0], [hits[0][0]], f"inhaltlich passend ({hits[0][1]:.2f})"
+            candidates += [h for h, _ in hits if h not in candidates]
+    except Exception as exc:
+        ctx.log.warning("Inhaltliche Suche für %s nicht möglich: %s", dead, exc)
+    return None, candidates[:3], ""
+
+
+def suggest_tags(ctx: Context, page: PageInfo, pages: list[PageInfo], load_vectors=None) -> list[str]:
+    """Tags für eine Seite ohne Tags: die üblichen des eigenen Ordners, sonst die der ähnlichsten Seiten.
+    load_vectors: liefert (ids, Seitenvektoren) – im Lint-Lauf einmal berechnet für alle Seiten."""
+    profile = ctx.conventions.profile_for_path(page.path)
+    if profile.common_tags and not profile.inherited:
+        return profile.common_tags[:5]
+    try:
+        from doku_agent import semantic
+        if not semantic.is_ready(ctx):
+            return []
+        ids, vectors = load_vectors() if load_vectors else semantic.page_vectors(ctx)
+        if page.id not in ids:
+            return []
+        tags_of = {p.id: p.tags for p in pages if p.tags}
+        sims = vectors @ vectors[ids.index(page.id)]
+        neighbors = [(float(sims[i]), pid) for i, pid in enumerate(ids) if pid != page.id and pid in tags_of]
+        neighbors = [n for n in sorted(neighbors, reverse=True)[:5] if n[0] >= 0.6]
+    except Exception as exc:
+        ctx.log.warning("Tag-Vorschlag für /%s nicht möglich: %s", page.path, exc)
+        return []
+    counts: dict[str, int] = {}
+    for _, pid in neighbors:
+        for tag in tags_of[pid]:
+            counts[tag] = counts.get(tag, 0) + 1
+    picked = [t for t, c in sorted(counts.items(), key=lambda x: -x[1]) if c >= 2]
+    if not picked and neighbors and neighbors[0][0] >= 0.8:
+        picked = list(tags_of[neighbors[0][1]])
+    return picked[:5]
+
+
+def propose_fixes(ctx: Context, info: PageInfo, link_map: dict[str, str], tags: list[str], notes: list[str]) -> int | None:
+    """Korrekturen einer Seite als normaler Wiki-Vorschlag (Diff, Freigabe)."""
+    page = ctx.wiki.get_page(info.id)
+    if page.content_type != "markdown":
+        link_map = {}
+    content = markdown.replace_links(page.content, link_map)
+    new_tags = list(dict.fromkeys([*page.tags, *tags]))
+    if content == page.content and new_tags == page.tags:
+        return None
+    diff = markdown.unified_diff(page.content, content, page.path)
+    if new_tags != page.tags:
+        diff += f"\n# Tags: {', '.join(page.tags) or '–'} -> {', '.join(new_tags)}\n"
+    payload = {"action": "update", "page_id": page.id, "path": page.path, "title": page.title,
+               "description": page.description, "tags": new_tags, "content": content, "base_hash": sha(page.content),
+               "blocks": [], "ops": [], "replacements": list(link_map.items()), "hints": notes, "stable_id": None}
+    return ctx.store.add_proposal("wiki_page", f"Wiki-Lint: {page.title} korrigieren", payload,
+                                  summary="Korrekturen aus dem Wiki-Lint: " + "; ".join(notes), diff=diff,
+                                  source="lint", dedup_key=f"lint-fix:{page.path}")
+
+
 def _report_path(ctx: Context) -> str:
     return normalize_path(ctx.cfg.wiki.paths.get("wiki_lint") or "wartung/wiki-lint")
+
+
+def report_untagged_pages(pages: list[PageInfo]) -> list[PageInfo]:
+    return [p for p in pages if not p.tags]
 
 
 def run_lint(ctx: Context) -> dict:
@@ -131,6 +234,47 @@ def run_lint(ctx: Context) -> dict:
             if target not in existing:
                 report["dead_links"].append({"path": page.path, "title": page.title, "target": "/" + target})
 
+    # --- Korrekturen: tote Links und fehlende Tags ----------------------------
+    fixes: dict[int, dict] = {}  # Seiten-ID -> {"links": {alt: neu}, "tags": [...], "notes": [...]}
+    candidates_pages = [p for p in pages if not skip(p)]
+    if cfg.lint.fix_links and report["dead_links"]:
+        content_cache: dict[int, list[str]] = {}
+        for d in report["dead_links"]:
+            dead = d["target"].lstrip("/")
+            target, candidates, why = suggest_target(ctx, dead, [p for p in candidates_pages if p.path != d["path"]])
+            d["fix"], d["candidates"] = (f"/{target}" if target else None), candidates
+            if not target:
+                continue
+            page = next(p for p in checked if p.path == d["path"])
+            if page.id not in content_cache:
+                content_cache[page.id] = markdown.link_targets(ctx.wiki.get_page(page.id).content)
+            for href in content_cache[page.id]:
+                if resolve_href(href, page.path, page.locale or cfg.wiki.locale) == dead:
+                    anchor = href[href.index("#"):] if "#" in href else ""
+                    explicit = href.startswith("/") and dead.split("/")[0] == href.strip("/").split("/")[0]
+                    new = f"/{dead.split('/')[0]}/{target}" if explicit else f"/{target}"
+                    entry = fixes.setdefault(page.id, {"links": {}, "tags": [], "notes": []})
+                    entry["links"][href] = new + anchor
+                    entry["notes"].append(f"Link {href} → {new + anchor} ({why})")
+    from doku_agent import semantic
+    load_vectors = functools.cache(lambda: semantic.page_vectors(ctx))
+    if cfg.lint.suggest_tags:
+        for d in report_untagged_pages(checked):
+            tags = suggest_tags(ctx, d, pages, load_vectors)
+            if tags:
+                entry = fixes.setdefault(d.id, {"links": {}, "tags": [], "notes": []})
+                entry["tags"] = tags
+                entry["notes"].append(f"Tags ergänzt: {', '.join(tags)}")
+    fix_proposals = {}
+    for pid, entry in fixes.items():
+        try:
+            fix_proposals[pid] = propose_fixes(ctx, by_id[pid], entry["links"], entry["tags"], entry["notes"])
+        except Exception as exc:
+            report["errors"].append(f"Korrektur für /{by_id[pid].path}: {exc}")
+    for d in report["dead_links"]:
+        page = next((p for p in checked if p.path == d["path"]), None)
+        d["proposal"] = fix_proposals.get(page.id) if page and d.get("fix") else None
+
     # --- Dubletten --------------------------------------------------------
     managed = {}
     for stable_id, pid in mappings.items():
@@ -151,9 +295,8 @@ def run_lint(ctx: Context) -> dict:
                     report["duplicates"].append({"a": a.path, "a_title": a.title, "b": b.path, "b_title": b.title,
                                                  "reason": "gleicher Titel"})
     try:
-        from doku_agent import semantic
         if semantic.is_ready(ctx):
-            ids, vectors = semantic.page_vectors(ctx)
+            ids, vectors = load_vectors()
             sims = vectors @ vectors.T
             candidates = []
             for i, a in enumerate(ids):
@@ -172,7 +315,9 @@ def run_lint(ctx: Context) -> dict:
         report["errors"].append(f"Inhaltsvergleich: {exc}")
 
     # --- ohne Tags --------------------------------------------------------
-    report["untagged"] = [{"path": p.path, "title": p.title} for p in checked if not p.tags]
+    report["untagged"] = [{"path": p.path, "title": p.title, "suggested": fixes.get(p.id, {}).get("tags", []),
+                           "proposal": fix_proposals.get(p.id) if fixes.get(p.id, {}).get("tags") else None}
+                          for p in report_untagged_pages(checked)]
 
     # --- veraltete Seiten / gelöschte Quellen ------------------------------
     if cfg.lint.refresh_stale:
@@ -210,6 +355,14 @@ def run_lint(ctx: Context) -> dict:
     return summary
 
 
+def _fix_text(d: dict) -> str:
+    if d.get("fix"):
+        return f"ersetzen durch `{d['fix']}`"
+    if d.get("candidates"):
+        return "Kandidaten: " + ", ".join(f"`/{c}`" for c in d["candidates"])
+    return "–"
+
+
 def _link(path: str, title: str) -> str:
     return f"[{(title or path).replace(']', '')}](/{path})"
 
@@ -228,13 +381,14 @@ def propose_report(ctx: Context, report: dict) -> int | None:
     blocks = [
         Block("lint-summary", "Zusammenfassung", f"Geprüft wurden {report['pages']} Seiten.\n\n{counts}"),
         Block("lint-dead-links", "Tote Links", section(
-            [[_link(d["path"], d["title"]), f"`{d['target']}`"] for d in report["dead_links"]],
-            ["Seite", "Linkziel (existiert nicht)"], "Keine toten Links.")),
+            [[_link(d["path"], d["title"]), f"`{d['target']}`", _fix_text(d)] for d in report["dead_links"]],
+            ["Seite", "Linkziel (existiert nicht)", "Vorschlag"], "Keine toten Links.")),
         Block("lint-duplicates", "Mögliche Dubletten", section(
             [[_link(d["a"], d["a_title"]), _link(d["b"], d["b_title"]), d["reason"]] for d in report["duplicates"]],
             ["Seite", "Ähnliche Seite", "Grund"], "Keine Dubletten gefunden.")),
         Block("lint-untagged", "Seiten ohne Tags", section(
-            [[_link(d["path"], d["title"])] for d in report["untagged"]], ["Seite"], "Alle Seiten haben Tags.")),
+            [[_link(d["path"], d["title"]), ", ".join(d.get("suggested") or []) or "–"] for d in report["untagged"]],
+            ["Seite", "Vorgeschlagene Tags"], "Alle Seiten haben Tags.")),
         Block("lint-stale", "Veraltete Seiten", section(
             [[_link(d["path"], d["title"]), f"`{d['source']}`"] for d in report["stale"]],
             ["Seite", "Quelle"], "Alle vom Agent gepflegten Seiten sind aktuell.")

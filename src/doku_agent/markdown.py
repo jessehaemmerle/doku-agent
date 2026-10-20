@@ -193,3 +193,64 @@ def code_block(text: str, lang: str = "") -> str:
     longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
     fence = "`" * max(3, longest + 1)
     return f"{fence}{lang}\n{text.rstrip()}\n{fence}"
+
+
+# --- Links (für Korrekturvorschläge des Wiki-Lint) -------------------------------
+
+_INLINE_LINK = re.compile(r"(\]\(\s*<?)([^)\s>]+)(>?(?:\s+\"[^\"]*\")?\s*\))")
+_REF_LINK = re.compile(r"^(\s*\[[^\]]+\]:\s*<?)(\S+?)(>?(?:\s+.*)?)$")
+_MARKER_LINE = re.compile(r"<!--\s*doku-agent:(begin|end)\s+")
+
+
+def _editable_lines(lines: list[str]) -> list[bool]:
+    """True für Zeilen außerhalb von Codeblöcken und außerhalb der vom Agent verwalteten Blöcke."""
+    out, fence, managed = [], "", 0
+    for line in lines:
+        m = _FENCE.match(line)
+        marker = _MARKER_LINE.search(line)
+        if marker:
+            managed += 1 if marker.group(1) == "begin" else -1
+            out.append(False)
+            continue
+        if m:
+            marker_text = m.group(1)
+            if not fence:
+                fence = marker_text
+            elif marker_text[0] == fence[0] and len(marker_text) >= len(fence):
+                fence = ""
+            out.append(False)
+            continue
+        out.append(not fence and managed <= 0)
+    return out
+
+
+def link_targets(md: str) -> list[str]:
+    """Alle Linkziele (Inline- und Referenzlinks) im bearbeitbaren Teil der Seite."""
+    lines = md.splitlines()
+    found = []
+    for line, ok in zip(lines, _editable_lines(lines)):
+        if not ok:
+            continue
+        found += [m.group(2) for m in _INLINE_LINK.finditer(line)]
+        ref = _REF_LINK.match(line)
+        if ref:
+            found.append(ref.group(2))
+    return found
+
+
+def replace_links(md: str, mapping: dict[str, str] | list | None) -> str:
+    """Linkziele exakt ersetzen (nur außerhalb von Codeblöcken und Agent-Blöcken)."""
+    mapping = dict(mapping or {})
+    if not mapping:
+        return md
+    lines = md.splitlines(keepends=True)
+    editable = _editable_lines([line.rstrip("\n") for line in lines])
+    out = []
+    for line, ok in zip(lines, editable):
+        if ok:
+            line = _INLINE_LINK.sub(lambda m: m.group(1) + mapping.get(m.group(2), m.group(2)) + m.group(3), line)
+            ref = _REF_LINK.match(line.rstrip("\n"))
+            if ref and ref.group(2) in mapping:
+                line = ref.group(1) + mapping[ref.group(2)] + ref.group(3) + ("\n" if line.endswith("\n") else "")
+        out.append(line)
+    return "".join(out)
