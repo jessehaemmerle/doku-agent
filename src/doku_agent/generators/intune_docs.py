@@ -142,6 +142,7 @@ def _policy_page(ctx: Context, policy: dict, category: str, rows: list[tuple[str
         intro=f"Dokumentation der Intune-Richtlinie **{name}**. Die markierten Abschnitte werden automatisch "
               f"über Microsoft Graph (nur lesend) aktualisiert.",
         source=f"intune:{category}:{policy['id']}", lookup_name=None,
+        stable_id=f"intune:{category}:{policy['id']}", sync_title=True,
     ))
 
 

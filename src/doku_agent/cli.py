@@ -68,6 +68,9 @@ def cmd_show(args) -> int:
         print("Nicht gefunden", file=sys.stderr)
         return 1
     print(f"#{p.id} {p.title} ({p.status})\n{p.summary}\n")
+    for c in p.payload.get("changes", []):
+        needs = f"  (benötigt {', '.join(c['requires'])})" if c.get("requires") else ""
+        print(f"  [{c['key']}] {c['label']}: {c['before']} -> {c['after']}{needs}")
     for hint in p.payload.get("hints", []):
         print(f"Hinweis: {hint}")
     print(p.diff or "")
@@ -77,9 +80,33 @@ def cmd_show(args) -> int:
 
 
 def cmd_approve(args) -> int:
+    from doku_agent.apply import ApplyError
+
+    try:
+        return _approve(args)
+    except ApplyError as exc:
+        print(f"Nicht übernommen: {exc}", file=sys.stderr)
+        return 1
+
+
+def _approve(args) -> int:
     from doku_agent.apply import apply_proposal
 
     ctx = _ctx(args)
+    prop = ctx.store.get_proposal(args.id)
+    if prop is not None and prop.payload.get("changes") and not args.nur and prop.payload.get("selected"):
+        # ohne --nur: alle Änderungen, keine Auswahl aus einem früheren Versuch
+        ctx.store.update_proposal(args.id, payload={**prop.payload, "selected": None})
+    if args.nur:
+        from doku_agent.apply import validate_selection
+
+        prop = ctx.store.get_proposal(args.id)
+        if prop is None or not prop.payload.get("changes"):
+            print("--nur gilt nur für Netbox-Anpassungen mit einzelnen Änderungen", file=sys.stderr)
+            return 2
+        selected = [k.strip() for k in args.nur.split(",") if k.strip()]
+        validate_selection(prop.payload["changes"], set(selected))
+        ctx.store.update_proposal(args.id, payload={**prop.payload, "selected": selected})
     result = apply_proposal(ctx, args.id)
     p = ctx.store.get_proposal(args.id)
     print(p.result if result == "applied" else result)
@@ -147,6 +174,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("approve", help="Vorschlag freigeben und ausführen")
     p.add_argument("id", type=int)
+    p.add_argument("--nur", help="nur diese Änderungen übernehmen, z.B. c1,c3 (Keys siehe 'show')")
     p.set_defaults(fn=cmd_approve)
 
     p = sub.add_parser("reject", help="Vorschlag ablehnen")

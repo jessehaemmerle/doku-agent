@@ -15,12 +15,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from doku_agent import markdown
-from doku_agent.apply import apply_proposal, reject_proposal
+from doku_agent.apply import ApplyError, apply_proposal, reject_proposal, validate_selection
 from doku_agent.context import Context
 from doku_agent.egress import allowed_hosts
 from doku_agent.extract import MAX_BYTES
 from doku_agent.jobs import JOBS, STARTABLE
 from doku_agent.netbox_plan import PlanError, validate_plan
+from doku_agent.netbox_sync import CATEGORY_LABELS
 
 HERE = Path(__file__).parent
 CSRF_COOKIE = "doku_csrf"
@@ -73,7 +74,7 @@ def create_app(ctx: Context) -> FastAPI:
     app = FastAPI(title="doku-agent", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
-    templates.env.globals.update(jobs=JOBS, status_labels=STATUS_LABELS)
+    templates.env.globals.update(jobs=JOBS, status_labels=STATUS_LABELS, categories=CATEGORY_LABELS)
     security = HTTPBasic(realm="doku-agent")
 
     def auth(creds: HTTPBasicCredentials = Depends(security)) -> str:
@@ -135,13 +136,23 @@ def create_app(ctx: Context) -> FastAPI:
     @app.post("/vorschlaege/{pid}/freigeben")
     def approve(pid: int, _: None = Depends(check_csrf), user: str = Depends(auth),
                 title: str = Form(None), path: str = Form(None), tags: str = Form(None),
-                content: str = Form(None), steps: str = Form(None)):
+                content: str = Form(None), steps: str = Form(None), change: list[str] | None = Form(None),
+                version: str = Form(None)):
         prop = ctx.store.get_proposal(pid)
         if prop is None:
             raise HTTPException(404, "Vorschlag nicht gefunden")
+        if version and version != prop.updated_at:
+            # Ein Lauf hat den Vorschlag neu berechnet, während die Seite offen war.
+            return _redirect(f"/vorschlaege/{pid}", "Der Vorschlag wurde inzwischen aktualisiert – bitte erneut "
+                             "prüfen und dann übernehmen.", error=True)
         payload = dict(prop.payload)
         try:
-            if prop.kind == "netbox_plan" and steps is not None:
+            if payload.get("changes"):
+                # Auswahl vor dem Schreiben prüfen; ein Auswahlfehler lässt den Vorschlag offen.
+                validate_selection(payload["changes"], set(change or []))
+                payload["selected"] = list(change or [])
+                ctx.store.update_proposal(pid, payload=payload)
+            elif prop.kind == "netbox_plan" and steps is not None:
                 new_steps = json.loads(steps)
                 validate_plan(new_steps)
                 if new_steps != payload["steps"]:
@@ -152,6 +163,10 @@ def create_app(ctx: Context) -> FastAPI:
             result = apply_proposal(ctx, pid)
         except (json.JSONDecodeError, PlanError) as exc:
             return _redirect(f"/vorschlaege/{pid}", f"Plan ungültig: {exc}", error=True)
+        except ApplyError as exc:
+            if ctx.store.get_proposal(pid).status == "pending":
+                return _redirect(f"/vorschlaege/{pid}", str(exc), error=True)
+            return _redirect(f"/vorschlaege/{pid}", f"Fehler beim Übernehmen: {exc}", error=True)
         except Exception as exc:
             return _redirect(f"/vorschlaege/{pid}", f"Fehler beim Übernehmen: {exc}", error=True)
         if result != "applied":

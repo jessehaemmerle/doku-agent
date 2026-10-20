@@ -41,6 +41,8 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
                             "Seite existiert inzwischen – als Ergänzung neu berechnet, bitte erneut prüfen.")
         page_id = wiki.create_page(payload["path"], payload["title"], payload["content"],
                                    payload.get("description", ""), payload.get("tags", []))
+        if payload.get("stable_id"):
+            ctx.store.kv_set(f"page-for:{payload['stable_id']}", page_id)
         ctx.store.update_proposal(prop.id, status="applied",
                                   result=f"Seite angelegt (ID {page_id}): {wiki.page_url(payload['path'])}")
         return "applied"
@@ -56,18 +58,80 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
                         "Seite wurde zwischenzeitlich geändert – Vorschlag neu berechnet, bitte erneut prüfen.")
     wiki.update_page(page, content=payload["content"], description=payload.get("description"),
                      tags=payload.get("tags"), title=payload.get("title"))
+    if payload.get("stable_id"):
+        ctx.store.kv_set(f"page-for:{payload['stable_id']}", page.id)
     ctx.store.update_proposal(prop.id, status="applied", result=f"Seite aktualisiert: {wiki.page_url(page.path)}")
     return "applied"
+
+
+def validate_selection(changes: list[dict], selected: set[str]) -> None:
+    """Auswahl prüfen, bevor etwas geschrieben wird (ohne Netbox-Zugriff)."""
+    if not selected:
+        raise ApplyError("Keine Änderung ausgewählt.")
+    unknown = selected - {c["key"] for c in changes}
+    if unknown:
+        raise ApplyError(f"Unbekannte Änderung(en): {', '.join(sorted(unknown))}")
+    labels = {c["key"]: c["label"] for c in changes}
+    for c in changes:
+        missing = [r for r in c.get("requires", []) if c["key"] in selected and r not in selected]
+        if missing:
+            raise ApplyError(f"'{c['label']}' setzt '{', '.join(labels.get(r, r) for r in missing)}' voraus – "
+                             "bitte mit auswählen.")
+
+
+def selected_steps(ctx: Context, payload: dict) -> tuple[list[dict], list[str], list[str]]:
+    """Schritte der ausgewählten Änderungen. Rückgabe: (Schritte, übernommene, übersprungene Labels).
+
+    Eine Änderung wird übersprungen, wenn ihr Feld in Netbox seit dem Vorschlag geändert wurde –
+    dann gewinnt die Handarbeit. Änderungen, die eine übersprungene voraussetzen, entfallen mit.
+    """
+    from doku_agent.netbox_plan import comparable
+
+    changes = payload["changes"]
+    selected = set(payload.get("selected") or [c["key"] for c in changes])
+    validate_selection(changes, selected)
+    objects: dict[tuple[str, int], dict] = {}
+    dropped: set[str] = set()
+    skipped: list[str] = []
+    for c in changes:
+        if c["key"] not in selected:
+            continue
+        check = c.get("check")
+        if check:
+            key = (check["endpoint"], check["id"])
+            if key not in objects:
+                objects[key] = ctx.netbox.get(*key)
+            current = comparable(objects[key].get(check["field"]))
+            if current != check["value"]:
+                dropped.add(c["key"])
+                skipped.append(f"{c['label']}: in Netbox inzwischen geändert – übersprungen")
+                continue
+        if any(r in dropped for r in c.get("requires", [])):
+            dropped.add(c["key"])
+            skipped.append(f"{c['label']}: Voraussetzung übersprungen – übersprungen")
+    applied = [c for c in changes if c["key"] in selected and c["key"] not in dropped]
+    steps = [step for c in applied for step in c["steps"]]
+    return steps, [c["label"] for c in applied], skipped
 
 
 def apply_netbox(ctx: Context, prop: Proposal) -> str:
     from doku_agent.netbox_plan import execute_plan
 
-    created = execute_plan(ctx.netbox, prop.payload["steps"], ctx.log)
-    lines = [f"{ref}: {endpoint} #{oid}" for ref, (endpoint, oid) in created.items()]
-    followup = prop.payload.get("followup")
-    if followup and followup.get("ref") in created:
-        _, oid = created[followup["ref"]]
+    payload = prop.payload
+    if payload.get("changes"):
+        steps, applied, skipped = selected_steps(ctx, payload)
+        if not steps:
+            raise ApplyError("Nichts übernommen: " + "; ".join(skipped))
+    else:
+        steps, applied, skipped = payload["steps"], [], []
+    created = execute_plan(ctx.netbox, steps, ctx.log)
+    if payload.get("changes"):
+        lines = [f"Übernommen: {label}" for label in applied] + skipped
+    else:
+        lines = [f"{ref}: {endpoint} #{oid}" for ref, (endpoint, oid) in created.items()]
+    followup = payload.get("followup") or {}
+    oid = followup.get("id") or (created[followup["ref"]][1] if followup.get("ref") in created else None)
+    if oid:
         jid = ctx.store.enqueue("netbox_device", {"kind": followup.get("kind", "device"), "id": oid})
         lines.append(f"Wiki-Dokumentation als Job #{jid} eingeplant.")
     ctx.store.update_proposal(prop.id, status="applied", result="\n".join(lines) or "Nichts zu tun.")

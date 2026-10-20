@@ -12,6 +12,28 @@
         {% if diff %}<pre class="diff">{% for cls, line in diff %}<span class="{{ cls }}">{{ line }}</span>{% endfor %}</pre>
         {% else %}<p class="muted">Kein Unterschied zur aktuellen Seite.</p>{% endif %}
       </div>
+    {% elif p.payload.changes %}
+      {% set chosen = p.payload.selected or [] %}
+      <div class="sheet">
+        <h2>Abweichungen bei {{ p.payload.target.name }}</h2>
+        <p class="muted">Gefunden über {{ {'serial': 'Seriennummer', 'name': 'Hostname', 'mac': 'MAC-Adresse'}[p.payload.target.matched_by] }}.
+          {% if p.status == 'pending' %}Abgewählte Änderungen werden beim nächsten Lauf erneut vorgeschlagen.{% endif %}</p>
+        <div class="table-scroll"><table class="changes">
+          <thead><tr><th scope="col">Übernehmen</th><th scope="col">Änderung</th><th scope="col">Vorher</th><th scope="col">Nachher</th></tr></thead>
+          <tbody>
+          {% for c in p.payload.changes %}
+            <tr>
+              <td><input type="checkbox" form="freigabe" name="change" value="{{ c.key }}" id="ch-{{ c.key }}"
+                   {% if not chosen or c.key in chosen %}checked{% endif %} {% if p.status != 'pending' %}disabled{% endif %}></td>
+              <td><label for="ch-{{ c.key }}">{{ c.label }}</label>
+                <span class="sub">{{ categories[c.category] }}{% if c.requires %}, braucht {% for r in c.requires %}{% set req = p.payload.changes|selectattr('key', 'equalto', r)|first %}{{ req.label if req else r }}{% if not loop.last %} und {% endif %}{% endfor %}{% endif %}</span></td>
+              <td class="before">{{ c.before }}</td>
+              <td class="after">{{ c.after }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table></div>
+      </div>
     {% else %}
       <div class="sheet">
         <h2>Geplante Netbox-Änderungen</h2>
@@ -35,8 +57,9 @@
       <ul class="hints">{% for h in p.payload.hints %}<li>{{ h }}</li>{% endfor %}</ul>
     {% endif %}
     {% if p.status == 'pending' %}
-      <form method="post" action="/vorschlaege/{{ p.id }}/freigeben">
+      <form method="post" action="/vorschlaege/{{ p.id }}/freigeben" id="freigabe">
         <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="version" value="{{ p.updated_at }}">
         {% if p.kind == 'wiki_page' %}
         <details>
           <summary>Vor dem Übernehmen bearbeiten</summary>
@@ -51,7 +74,7 @@
           <label for="content">Inhalt (Markdown)</label>
           <textarea id="content" name="content" rows="18">{{ p.payload.content }}</textarea>
         </details>
-        {% else %}
+        {% elif not p.payload.changes %}
         <details>
           <summary>Plan bearbeiten (JSON)</summary>
           <label for="steps">Schritte <span class="muted">Referenzen wie "$dev" verweisen auf frühere Schritte</span></label>
@@ -59,7 +82,7 @@
         </details>
         {% endif %}
         <div class="actions">
-          <button class="primary" type="submit">{{ 'Ins Wiki übernehmen' if p.kind == 'wiki_page' else 'In Netbox anlegen' }}</button>
+          <button class="primary" type="submit">{% if p.kind == 'wiki_page' %}Ins Wiki übernehmen{% elif p.payload.changes %}Ausgewählte in Netbox übernehmen{% else %}In Netbox anlegen{% endif %}</button>
         </div>
       </form>
       <form method="post" action="/vorschlaege/{{ p.id }}/ablehnen">

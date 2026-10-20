@@ -59,6 +59,10 @@ netbox:
   vm_cluster: null             # optional: Cluster-ID für erkannte VMs
   assign_ips: true
   set_primary_ip: true
+  # Bereits eingetragene Maschinen abgleichen (jede Änderung einzeln freigebbar; [] = aus):
+  #   missing = Leeres füllen, os = Plattform/VM-Ressourcen, network = IPs/MACs, rename = Hostname
+  sync: [missing, os, network, rename]
+  memory_tolerance_percent: 10 # RAM-Abweichung, ab der angepasst wird (OS meldet weniger als zugewiesen)
 
 wazuh:
   enabled: true

@@ -15,6 +15,7 @@
 | Bedienung | Web-UI + CLI | FastAPI/Jinja2 ohne externe Ressourcen; argparse-CLI |
 | Betrieb | Docker Compose auf Linux, nächtlich | interner Scheduler; Ollama im internen Netz |
 | Freie Doku | Text + Dateien, keine Bilder | Textextraktion lokal (pypdf, python-docx), Map-Reduce bei langen Eingaben |
+| Netbox-Abgleich (20.10.2026) | fehlende Angaben, OS/VM, Netzwerk, Umbenennung; IPs für alle Maschinen; veraltete IPs nur melden; Freigabe je Änderung; keine automatische Ausnahme | `netbox_sync.py`, Auswahl + Konfliktprüfung in `apply.py`, Feld-Rollback in `netbox_plan.py` |
 
 ## Module
 
@@ -29,8 +30,9 @@ src/doku_agent/
   pages.py         Seiten-Entwurf -> Vorschlag (neu oder Ergänzung), Pfadvorlagen, Ignorierliste
   store.py         SQLite: Vorschläge, Jobs, Ignorierliste, Cache (LLM-Texte nach Eingabe-Hash)
   apply.py         Freigegebene Vorschläge ausführen, Konflikterkennung, Neuberechnung
-  netbox_plan.py   Plan-Validierung (Endpunkt-/Aktions-Allowlist, Referenzen) und Ausführung mit Rollback
-  discovery.py     Intune/Wazuh-Inventar, Zusammenführung, Netbox-Abgleich, Plan-Erzeugung
+  netbox_plan.py   Plan-Validierung (Endpunkt-/Aktions-Allowlist, Referenzen), Ausführung mit Rollback (Löschen + Feld-Restore)
+  discovery.py     Intune/Wazuh-Inventar, Zusammenführung, Netbox-Index, Plan für neue Maschinen
+  netbox_sync.py   Abweichungen bekannter Maschinen als einzeln freigebbare Änderungen (Vorher/Nachher, Abhängigkeiten)
   connectors/      netbox.py, wazuh.py, intune.py
   generators/      wazuh_docs, intune_docs, netbox_docs, freeform, common (Maskierung, Cache, Stil)
   jobs.py          Job-Registry, Job-Log, Worker-Thread
@@ -75,9 +77,21 @@ Ein anschließendes Code-Review fand zehn weitere Schwachstellen, alle behoben u
 angelegt wird; abgeschnittene JSON-Antworten am Tokenlimit; HTTP-Clients pro Job; Code-Fences in Rohnotizen;
 Überschreiben von Hand bearbeiteter Vorschläge durch nächtliche Läufe.
 
+## Netbox-Abgleich geprüft (20.10.2026)
+
+Gegen Netbox 4.7.2, Wazuh-Manager 4.14.0 und Wiki.js 2.5.315: Maschine per Discovery angelegt, in Netbox von Hand
+umbenannt, Plattform verfälscht und primäre IP entfernt. Der nächste Lauf erkennt die Maschine über die MAC und schlägt
+drei Änderungen vor. In der Oberfläche wird die Umbenennung abgewählt; Plattform und primäre IP werden übernommen, der
+Steckbrief-Job läuft automatisch, und die bestehende Wiki-Seite übernimmt den neuen Titel (keine zweite Seite). Der
+Folgelauf schlägt nur noch die abgewählte Umbenennung vor. Integrationstests decken zusätzlich IP-Wechsel, neue NIC,
+Konfliktschutz bei Handänderung und Feld-Rollback ab.
+
+Dabei gefunden und behoben: Netbox-Slugs erlauben keine Punkte (`ubuntu-24.04` scheiterte, betraf auch das Anlegen);
+MAC-Vergleich war von der Schreibweise abhängig.
+
 ## Bewusst nicht umgesetzt
 
-- Drift-Erkennung für bereits bekannte Netbox-Objekte.
+- Status-Pflege (z.B. offline nach längerer Funkstille) und Löschen in Netbox.
 - Wazuh-Alarmberichte aus dem Indexer.
 - Wiki.js 3.x und Visual-Editor-Seiten.
 - Bildauswertung.

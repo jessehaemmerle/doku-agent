@@ -31,6 +31,7 @@ und **Intune** (Richtlinien, Profile, Apps), aber auch für beliebige andere The
 | Bereich | Was passiert | Ergebnis |
 |---|---|---|
 | **Netbox-Discovery** | Liest Geräte aus Intune und Wazuh-Agents (Seriennummer, Hostname, MACs, IPs, OS), führt sie zusammen und gleicht mit Netbox ab | Pro fehlender Maschine ein **Netbox-Plan** (Hersteller, Gerätetyp, Plattform, Gerät/VM, Interfaces, MACs, IPs, primäre IP). Nach Freigabe wird angelegt und automatisch ein **Steckbrief** im Wiki vorgeschlagen |
+| **Netbox-Abgleich** | Vergleicht bereits eingetragene Maschinen mit Intune und Wazuh | Pro Maschine ein Vorschlag mit **Vorher/Nachher je Änderung**, jede einzeln per Häkchen übernehmbar: fehlende Angaben, OS/Plattform und VM-Ressourcen, Netzwerk (IPs, MACs, primäre IP), Umbenennungen |
 | **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces und IPs | Wiki-Seite pro Maschine; der Netbox-Teil wird bei Änderungen aktualisiert |
 | **Wazuh-Regeln/Decoder** | Liest `etc/rules` bzw. `etc/decoders`, parst das XML | Seite pro Datei: Übersicht, Regel-Tabelle (Level, Bedingungen, MITRE) und Erläuterung jeder Regel durch das LLM |
 | **Wazuh-Konfiguration** | `ossec.conf` des Managers und `agent.conf` jeder Gruppe | Zusammenfassung und Einstellungen je Abschnitt; Passwörter, API-Keys und Webhooks werden maskiert |
@@ -168,6 +169,37 @@ Ein Plan ist eine Liste nachvollziehbarer Schritte, z.B.:
   Modell erkannt (`vm_serial_patterns`, `vm_model_patterns`) und als VM angelegt.
 - Ab Netbox 4.2 werden MAC-Adressen als eigene Objekte angelegt, ältere 4.x-Versionen erhalten die MAC am Interface.
 
+## Bestehende Maschinen abgleichen
+
+Findet die Discovery eine Maschine bereits in Netbox (über Seriennummer, Hostname oder MAC), vergleicht sie die
+Angaben und schlägt Anpassungen vor. Welche Arten aktiv sind, steuert `netbox.sync`:
+
+| Art | Was angepasst wird |
+|---|---|
+| `missing` | Leere Felder füllen: Seriennummer, Plattform, Gerätetyp statt „Unbekannt“, primäre IPv4; fehlende Interfaces, MACs und IPs ergänzen |
+| `os` | Plattform nach OS-Wechsel (z.B. Ubuntu 22.04 → 24.04), vCPUs und RAM von VMs (RAM erst ab `memory_tolerance_percent` Abweichung) |
+| `network` | Neue IP-Adressen, MAC-Wechsel an einem Interface, primäre IPv4 auf die aktuelle Haupt-IP |
+| `rename` | Neuer Hostname bei gleicher Seriennummer/MAC; eine Domain-Endung (`.firma.local`) bleibt erhalten |
+
+So bleibt eure Handarbeit geschützt:
+
+- **Alles mit Freigabe.** Ein Vorschlag pro Maschine, jede Änderung mit Vorher/Nachher und einzeln abwählbar
+  (CLI: `doku-agent approve 12 --nur c1,c3`). Hängt eine Änderung von einer anderen ab (IP an einem neuen
+  Interface), wird das angezeigt und geprüft.
+- **Konfliktschutz.** Wurde ein Feld nach dem Vorschlag in Netbox von Hand geändert, wird diese Änderung beim
+  Übernehmen übersprungen statt überschrieben.
+- **Nichts wird gelöscht.** IPs oder Interfaces, die Wazuh nicht mehr meldet, erscheinen nur als Hinweis.
+  Abweichende Seriennummern oder Modelle werden ebenfalls nur gemeldet (möglicher Hardwaretausch).
+- **Vollständiges Rollback.** Scheitert ein Schritt, werden angelegte Objekte gelöscht und geänderte Felder auf den
+  vorherigen Wert zurückgesetzt.
+- Ein allgemeinerer OS-Name gilt nicht als Abweichung: Meldet Intune nur „Windows“, bleibt eine gepflegte Plattform
+  „Windows 11 Pro“ stehen.
+- Abgewählte oder abgelehnte Änderungen werden beim nächsten Lauf erneut vorgeschlagen. Soll eine Maschine dauerhaft
+  in Ruhe gelassen werden: ablehnen mit „Nicht mehr vorschlagen“ (rückgängig unter *Status › Ignorierliste*).
+- Hat sich die Abweichung erledigt (z.B. von Hand korrigiert), wird ein offener Vorschlag automatisch geschlossen.
+- Nach dem Übernehmen wird der Wiki-Steckbrief aktualisiert. Nach einer Umbenennung folgt die bestehende Seite dem
+  neuen Namen (Titel), statt dass eine zweite Seite entsteht.
+
 ## Modell und Leistung (16 GB RAM, nur CPU)
 
 | Modell | RAM | Einsatz |
@@ -218,8 +250,8 @@ Aufbau und Entscheidungen: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
 ## Grenzen
 
 - Wiki.js 3.x wird nicht unterstützt (andere API). Seiten im Visual Editor werden nicht bearbeitet.
-- Discovery legt nur **fehlende** Maschinen an. Abweichungen bei bekannten Maschinen (z.B. neue IP) werden noch nicht
-  gemeldet.
+- Der Netbox-Abgleich löscht nie etwas und ändert den Gerätetyp nur, wenn er „Unbekannt“ ist. Status (z.B. offline)
+  wird nicht gepflegt. Wiki-Seiten werden nach einer Umbenennung nicht verschoben (nur der Titel ändert sich).
 - Wazuh-Alarm-Auswertungen aus dem Indexer sind nicht enthalten (bewusst ausgeklammert).
 - Bilder bzw. Screenshots in Aufträgen werden nicht ausgewertet (Vision-Modell auf CPU zu langsam).
 

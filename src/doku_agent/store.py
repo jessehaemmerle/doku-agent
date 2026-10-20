@@ -167,6 +167,12 @@ class Store:
         with self._conn() as db:
             db.execute(sql, (*fields.values(), now(), pid))
 
+    def close_pending(self, dedup_key: str, result: str) -> None:
+        """Offenen Vorschlag schließen, der sich erledigt hat (z.B. von Hand in Netbox korrigiert)."""
+        with self._conn() as db:
+            db.execute("UPDATE proposals SET status='rejected', result=?, updated_at=? "
+                       "WHERE dedup_key=? AND status='pending'", (result, now(), dedup_key))
+
     def count_pending(self) -> int:
         with self._conn() as db:
             return db.execute("SELECT COUNT(*) FROM proposals WHERE status='pending'").fetchone()[0]

@@ -79,11 +79,21 @@ def _resolve(value, ids: dict[str, int]):
     return value
 
 
+def comparable(value):
+    """Netbox-Feldwert so, wie man ihn zurückschreiben kann: verschachtelte Objekte über id bzw. value."""
+    if isinstance(value, dict):
+        return value.get("id", value.get("value"))
+    return value
+
+
 def execute_plan(nb: NetboxClient, steps: list[dict], log: logging.Logger) -> dict[str, tuple[str, int]]:
+    """Führt den Plan aus. Bei einem Fehler wird alles rückgängig gemacht: angelegte Objekte werden
+    gelöscht, geänderte Felder bestehender Objekte auf den vorherigen Wert zurückgesetzt."""
     validate_plan(steps)
     ids: dict[str, int] = {}
     refs: dict[str, tuple[str, int]] = {}
-    created: list[tuple[str, int]] = []
+    undo: list[tuple[str, str, int, dict | None]] = []  # ("delete"|"restore", Endpunkt, ID, alte Werte)
+    created: set[tuple[str, int]] = set()
     try:
         for idx, step in enumerate(steps, 1):
             endpoint = step["endpoint"].strip("/")
@@ -95,27 +105,37 @@ def execute_plan(nb: NetboxClient, steps: list[dict], log: logging.Logger) -> di
                     log.info("Schritt %s: %s existiert bereits (#%s)", idx, endpoint, oid)
                 else:
                     oid = nb.create(endpoint, data)["id"]
-                    created.append((endpoint, oid))
+                    undo.append(("delete", endpoint, oid, None))
+                    created.add((endpoint, oid))
                     log.info("Schritt %s: %s angelegt (#%s)", idx, endpoint, oid)
             elif step["action"] == "create":
                 oid = nb.create(endpoint, data)["id"]
-                created.append((endpoint, oid))
+                undo.append(("delete", endpoint, oid, None))
+                created.add((endpoint, oid))
                 log.info("Schritt %s: %s angelegt (#%s)", idx, endpoint, oid)
             else:
                 oid = int(_resolve(step["id"], ids))
+                if (endpoint, oid) not in created:  # in diesem Lauf angelegte Objekte werden ohnehin gelöscht
+                    before = nb.get(endpoint, oid)
+                    undo.append(("restore", endpoint, oid, {k: comparable(before.get(k)) for k in data}))
                 nb.update(endpoint, oid, data)
                 log.info("Schritt %s: %s #%s aktualisiert", idx, endpoint, oid)
             if step.get("ref"):
                 ids[step["ref"]] = oid
                 refs[step["ref"]] = (endpoint, oid)
     except Exception as exc:
-        rollback_notes = []
-        for endpoint, oid in reversed(created):
+        notes = []
+        for kind, endpoint, oid, old in reversed(undo):
             try:
-                nb.delete(endpoint, oid)
-                rollback_notes.append(f"{endpoint} #{oid} entfernt")
-            except Exception as del_exc:  # Rollback darf nicht abbrechen
-                rollback_notes.append(f"{endpoint} #{oid} NICHT entfernt ({del_exc})")
-        log.error("Plan fehlgeschlagen: %s; Rollback: %s", exc, "; ".join(rollback_notes) or "nichts angelegt")
-        raise NetboxError(f"{exc} | Rollback: {'; '.join(rollback_notes) or 'nichts angelegt'}") from exc
+                if kind == "delete":
+                    nb.delete(endpoint, oid)
+                    notes.append(f"{endpoint} #{oid} entfernt")
+                else:
+                    nb.update(endpoint, oid, old)
+                    notes.append(f"{endpoint} #{oid} zurückgesetzt")
+            except Exception as undo_exc:  # Rollback darf nicht abbrechen
+                notes.append(f"{endpoint} #{oid} NICHT rückgängig gemacht ({undo_exc})")
+        summary = "; ".join(notes) or "nichts zu tun"
+        log.error("Plan fehlgeschlagen: %s; Rollback: %s", exc, summary)
+        raise NetboxError(f"{exc} | Rollback: {summary}") from exc
     return refs

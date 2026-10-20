@@ -65,6 +65,8 @@ class FakeWiki:
                 return httpx.Response(200, json={"errors": [{"message": "This page does not exist."}]})
             data = {"pages": {"singleByPath": self._full(page)}}
         elif "single(" in q:
+            if v["id"] not in self.pages:
+                return httpx.Response(200, json={"errors": [{"message": "This page does not exist."}]})
             data = {"pages": {"single": self._full(self.pages[v["id"]])}}
         elif "search(" in q:
             data = {"pages": {"search": {"results": []}}}
@@ -110,10 +112,21 @@ class FakeNetbox:
         store = self.objects.setdefault(endpoint, {})
         if request.method == "GET" and oid is None:
             params = {k: v for k, v in request.url.params.items() if k not in ("limit", "offset")}
+            def ref_id(value):
+                return value.get("id") if isinstance(value, dict) else value
+
             def matches(o, k, v):
                 if k == "address":  # Netbox vergleicht Host-Adressen unabhängig von der Maske
                     return str(o.get(k, "")).split("/")[0] == v.split("/")[0]
-                return str(o.get(k)) == v
+                if endpoint == "ipam/ip-addresses" and k in ("device_id", "virtual_machine_id"):
+                    # wie Netbox: IPs eines Geräts = IPs an dessen Interfaces
+                    parent = "device" if k == "device_id" else "virtual_machine"
+                    ifaces = self.objects.get("dcim/interfaces" if parent == "device" else "virtualization/interfaces", {})
+                    ids = {i["id"] for i in ifaces.values() if str(ref_id(i.get(parent))) == v}
+                    return o.get("assigned_object_id") in ids
+                if k.endswith("_id") and k not in o:
+                    return str(ref_id(o.get(k[:-3]))) == v
+                return str(ref_id(o.get(k))) == v
             results = [o for o in store.values() if all(matches(o, k, v) for k, v in params.items())]
             return httpx.Response(200, json={"count": len(results), "next": None, "results": results})
         if request.method == "GET":

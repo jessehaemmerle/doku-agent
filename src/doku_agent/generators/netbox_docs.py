@@ -72,7 +72,7 @@ def document_object(ctx: Context, kind: str, obj_id: int) -> int | None:
         blocks=blocks, path_vars={"name": name, "site": _n(obj.get("site"), "slug"), "role": _n(obj.get("role"), "slug")},
         intro=f"Steckbrief von **{name}**. Die markierten Abschnitte werden automatisch aus Netbox aktualisiert – "
               f"eigene Ergänzungen bitte außerhalb davon.",
-        lookup_name=name, source=f"netbox:{kind}:{obj_id}",
+        lookup_name=name, source=f"netbox:{kind}:{obj_id}", stable_id=f"netbox:{kind}:{obj_id}", sync_title=True,
     ))
 
 

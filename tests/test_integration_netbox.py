@@ -103,3 +103,73 @@ def test_rollback_on_real_validation_error(nb):
     with pytest.raises(Exception, match="Rollback"):
         execute_plan(client, steps, log)
     assert client.list("dcim/devices", name=name) == []
+
+
+def test_sync_existing_machine_against_real_netbox(nb, ctx):
+    from doku_agent.apply import apply_proposal
+    from doku_agent.netbox_sync import propose_sync
+
+    client, cfg, site, created = nb
+    ctx.__dict__["netbox"] = client
+    ctx.cfg.netbox = cfg.netbox
+    sfx = uuid.uuid4().hex[:4]
+    octet = int(sfx[:2], 16) % 200 + 10
+    asset = Asset(name=f"sync-{sfx}", serial=f"SY{sfx}", os_name="Ubuntu", primary_ip=f"10.98.{octet}.10",
+                  interfaces=[Iface("eth0", f"02:00:00:01:{sfx[:2]}:{sfx[2:]}", [f"10.98.{octet}.10/24"])],
+                  sources={"wazuh": {"agent_id": "042"}})
+    refs = execute_plan(client, build_plan(asset, client, cfg.netbox, site["id"])[0], log)
+    dev_id = refs["dev"][1]
+    created.append(("dcim/devices", dev_id))
+
+    # Abweichungen: OS-Upgrade, IP-Wechsel, zweite Netzwerkkarte, neuer Hostname
+    changed = Asset(name=f"sync-neu-{sfx}", serial=asset.serial, os_name="Ubuntu 24.04", primary_ip=f"10.98.{octet}.20",
+                    interfaces=[Iface("eth0", asset.interfaces[0].mac, [f"10.98.{octet}.20/24"]),
+                                Iface("eth1", f"02:00:00:02:{sfx[:2]}:{sfx[2:]}")],
+                    sources={"wazuh": {"agent_id": "042"}})
+    index = NetboxIndex(client)
+    assert propose_sync(ctx, changed, index.find(changed), index)
+    prop = ctx.store.list_proposals("pending")[0]
+    labels = {c["label"]: c for c in prop.payload["changes"]}
+    assert set(labels) == {"Plattform", "Name", "Interface", "IP an eth0", "Primäre IPv4"}
+    assert any(f"10.98.{octet}.10/24" in h for h in prop.payload["hints"])  # alte IP nur gemeldet
+
+    keep = [c["key"] for c in prop.payload["changes"] if c["label"] != "Name"]
+    ctx.store.update_proposal(prop.id, payload={**prop.payload, "selected": keep})
+    assert apply_proposal(ctx, prop.id) == "applied"
+    dev = client.get("dcim/devices", dev_id)
+    assert dev["name"] == asset.name  # Umbenennung abgewählt
+    assert dev["platform"]["slug"] == "ubuntu-24-04"
+    assert dev["primary_ip4"]["address"] == f"10.98.{octet}.20/24"
+    ifaces = {i["name"]: i for i in client.list("dcim/interfaces", device_id=dev_id)}
+    assert ifaces["eth1"]["primary_mac_address"]["mac_address"].upper() == changed.interfaces[1].mac
+    hosts = {ip["address"] for ip in client.list("ipam/ip-addresses", device_id=dev_id)}
+    assert hosts == {f"10.98.{octet}.10/24", f"10.98.{octet}.20/24"}  # alte IP bleibt (nur melden)
+    created[:0] = [("ipam/ip-addresses", ip["id"]) for ip in client.list("ipam/ip-addresses", device_id=dev_id)]
+
+    # Nächster Lauf schlägt nur noch die Umbenennung vor; Name wird vorher von Hand geändert -> übersprungen
+    index = NetboxIndex(client)
+    assert propose_sync(ctx, changed, index.find(changed), index)
+    prop = ctx.store.list_proposals("pending")[0]
+    assert [c["label"] for c in prop.payload["changes"]] == ["Name"]
+    client.update("dcim/devices", dev_id, {"name": f"von-hand-{sfx}"})
+    with pytest.raises(Exception, match="Nichts übernommen"):
+        apply_proposal(ctx, prop.id)
+    assert client.get("dcim/devices", dev_id)["name"] == f"von-hand-{sfx}"
+
+
+def test_update_rollback_against_real_netbox(nb):
+    client, cfg, site, created = nb
+    role = client.list("dcim/device-roles", slug="server") or [client.create(
+        "dcim/device-roles", {"name": "Server", "slug": "server", "color": "9e9e9e"})]
+    mfr = client.list("dcim/manufacturers", slug="it-test") or [client.create(
+        "dcim/manufacturers", {"name": "IT-Test", "slug": "it-test"})]
+    dtype = client.list("dcim/device-types", slug="it-box") or [client.create(
+        "dcim/device-types", {"manufacturer": mfr[0]["id"], "model": "IT-Box", "slug": "it-box"})]
+    dev = client.create("dcim/devices", {"name": f"rb2-{uuid.uuid4().hex[:6]}", "site": site["id"], "serial": "ALT",
+                                         "role": role[0]["id"], "device_type": dtype[0]["id"]})
+    created.append(("dcim/devices", dev["id"]))
+    steps = [{"action": "update", "endpoint": "dcim/devices", "id": dev["id"], "data": {"serial": "NEU"}},
+             {"action": "create", "endpoint": "ipam/ip-addresses", "data": {"address": "999.1.1.1/24"}}]
+    with pytest.raises(Exception, match="zurückgesetzt"):
+        execute_plan(client, steps, log)
+    assert client.get("dcim/devices", dev["id"])["serial"] == "ALT"

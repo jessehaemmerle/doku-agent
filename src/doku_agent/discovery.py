@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -28,6 +29,11 @@ SKIP_IFACES = re.compile(r"^(lo\d*|docker\d*|veth.*|br-.*|virbr.*|vmnet.*|tun\d*
 
 class DiscoveryError(RuntimeError):
     pass
+
+
+def netbox_slug(text: str) -> str:
+    """Netbox-Slug: nur Buchstaben, Ziffern, '-' und '_', höchstens 100 Zeichen (Punkte sind nicht erlaubt)."""
+    return slugify(text).replace(".", "-").strip("-")[:100].strip("-") or "unbekannt"
 
 
 def norm_serial(serial: str | None) -> str:
@@ -71,6 +77,8 @@ class Iface:
     name: str
     mac: str = ""
     ips: list[str] = field(default_factory=list)  # CIDR-Notation
+    # False: MAC taugt nicht zur Wiedererkennung (Intune-Ethernet-MAC gehört oft der Docking-Station).
+    identifies: bool = True
 
 
 @dataclass
@@ -95,6 +103,10 @@ class Asset:
     @property
     def macs(self) -> set[str]:
         return {i.mac for i in self.interfaces if i.mac}
+
+    @property
+    def identifying_macs(self) -> set[str]:
+        return {i.mac for i in self.interfaces if i.mac and i.identifies}
 
     def merge(self, other: "Asset") -> None:
         for attr in ("serial", "manufacturer", "model", "os_name", "os_version", "primary_ip"):
@@ -193,7 +205,7 @@ def merge_assets(assets: list[Asset]) -> list[Asset]:
     for asset in assets:
         target = (by_serial.get(asset.serial.upper()) if asset.serial else None) \
             or by_name.get(asset.name.lower()) \
-            or next((by_mac[m] for m in asset.macs if m in by_mac), None)
+            or next((by_mac[m] for m in asset.identifying_macs if m in by_mac), None)
         if target is None:
             merged.append(asset)
             target = asset
@@ -203,7 +215,7 @@ def merge_assets(assets: list[Asset]) -> list[Asset]:
             by_serial[target.serial.upper()] = target
         if target.name:
             by_name[target.name.lower()] = target
-        for mac in target.macs:
+        for mac in target.identifying_macs:
             by_mac[mac] = target
     return merged
 
@@ -219,33 +231,56 @@ def detect_virtual(asset: Asset, cfg: NetboxConfig) -> bool:
 # --- Abgleich mit Netbox ---------------------------------------------------
 
 class NetboxIndex:
+    """Alle Geräte und VMs aus Netbox, indiziert nach Seriennummer, Name und MAC."""
+
     def __init__(self, nb: NetboxClient):
-        self.serials: dict[str, dict] = {}
-        self.names: dict[str, dict] = {}
-        self.macs: dict[str, str] = {}
+        self.objects: dict[tuple[str, int], dict] = {}
+        self.serials: dict[str, tuple[str, int]] = {}
+        self.names: dict[str, tuple[str, int]] = {}
+        self.macs: dict[str, tuple[str, int]] = {}
+        self.orphan_macs: set[str] = set()  # MAC-Objekte ohne Gerät/VM
         for endpoint in ("dcim/devices", "virtualization/virtual-machines"):
             for obj in nb.list(endpoint):
-                obj["_endpoint"] = endpoint
+                key = (endpoint, obj["id"])
+                self.objects[key] = obj
                 if norm_serial(obj.get("serial")):
-                    self.serials[obj["serial"].strip().upper()] = obj
+                    self.serials[obj["serial"].strip().upper()] = key
                 if obj.get("name"):
-                    self.names[obj["name"].lower()] = obj
-                    self.names.setdefault(short_name(obj["name"]).lower(), obj)
+                    self.names[obj["name"].lower()] = key
+                    self.names.setdefault(short_name(obj["name"]).lower(), key)
         if nb.has_mac_objects:
             for mac in nb.list("dcim/mac-addresses"):
                 assigned = mac.get("assigned_object") or {}
-                parent = assigned.get("device") or assigned.get("virtual_machine") or {}
-                self.macs[norm_mac(mac.get("mac_address"))] = parent.get("name") or f"MAC #{mac['id']}"
+                if assigned.get("device"):
+                    self.macs[norm_mac(mac.get("mac_address"))] = ("dcim/devices", assigned["device"]["id"])
+                elif assigned.get("virtual_machine"):
+                    self.macs[norm_mac(mac.get("mac_address"))] = (
+                        "virtualization/virtual-machines", assigned["virtual_machine"]["id"])
+                else:
+                    self.orphan_macs.add(norm_mac(mac.get("mac_address")))
+
+    def find(self, asset: Asset) -> tuple[str, int, str] | None:
+        """(Endpunkt, ID, Trefferart) – Trefferart: serial, name oder mac."""
+        if asset.serial and asset.serial.upper() in self.serials:
+            return (*self.serials[asset.serial.upper()], "serial")
+        if asset.name.lower() in self.names:
+            return (*self.names[asset.name.lower()], "name")
+        for mac in sorted(asset.identifying_macs):
+            if mac in self.macs:
+                return (*self.macs[mac], "mac")
+        return None
 
     def match(self, asset: Asset) -> str | None:
-        if asset.serial and asset.serial.upper() in self.serials:
-            return f"Seriennummer → {self.serials[asset.serial.upper()].get('name')}"
-        if asset.name.lower() in self.names:
-            return f"Hostname → {self.names[asset.name.lower()].get('name')}"
-        for mac in asset.macs:
-            if mac in self.macs:
-                return f"MAC {mac} → {self.macs[mac]}"
-        return None
+        found = self.find(asset)
+        if found is None:
+            return None
+        endpoint, oid, how = found
+        name = self.objects.get((endpoint, oid), {}).get("name") or f"#{oid}"
+        return {"serial": "Seriennummer", "name": "Hostname", "mac": "MAC"}[how] + f" → {name}"
+
+    def name_taken(self, name: str, own: tuple[str, int]) -> bool:
+        key = self.names.get(name.lower()) or self.names.get(short_name(name).lower())
+        return key is not None and key != own
 
 
 # --- Plan erzeugen ---------------------------------------------------------
@@ -268,7 +303,7 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int) 
                   "data": {"name": role.replace("-", " ").title(), "slug": role, "color": "9e9e9e", "vm_role": True},
                   "note": f"Rolle '{role}'"})
     if asset.os_name:
-        pslug = slugify(asset.os_name)
+        pslug = netbox_slug(asset.os_name)
         steps.append({"ref": "platform", "action": "ensure", "endpoint": "dcim/platforms", "lookup": {"slug": pslug},
                       "data": {"name": asset.os_name, "slug": pslug}, "note": f"Plattform '{asset.os_name}'"})
     comments = [f"Automatisch erkannt am {date.today().isoformat()} über {sources}."]
@@ -298,7 +333,7 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int) 
     else:
         manufacturer = asset.manufacturer or cfg.unknown_manufacturer
         model = asset.model or cfg.unknown_model
-        mslug, tslug = slugify(manufacturer), slugify(model)
+        mslug, tslug = netbox_slug(manufacturer), netbox_slug(model)
         steps.append({"ref": "mfr", "action": "ensure", "endpoint": "dcim/manufacturers", "lookup": {"slug": mslug},
                       "data": {"name": manufacturer, "slug": mslug}, "note": f"Hersteller '{manufacturer}'"})
         steps.append({"ref": "dtype", "action": "ensure", "endpoint": "dcim/device-types",
@@ -361,6 +396,17 @@ def plan_summary(asset: Asset, vm: bool, steps: list[dict], match_hint: str = ""
     return text + (f"\n\n{match_hint}" if match_hint else "")
 
 
+def _ethernet_mac(ctx: Context, device_id: str) -> str:
+    """Ethernet-MAC aus Intune (eine Graph-Abfrage pro Gerät) – 7 Tage zwischengespeichert."""
+    key = f"intune-ethmac:{device_id}"
+    cached = ctx.store.kv_get(key)
+    if cached and time.time() - cached.get("at", 0) < 7 * 86400:
+        return cached.get("mac", "")
+    mac = norm_mac(ctx.intune.ethernet_mac(device_id))
+    ctx.store.kv_set(key, {"mac": mac, "at": time.time()})
+    return mac
+
+
 def run_discovery(ctx: Context) -> dict:
     cfg = ctx.cfg
     if not cfg.netbox.site:
@@ -370,30 +416,40 @@ def run_discovery(ctx: Context) -> dict:
     if not site:
         raise DiscoveryError(f"Standort '{cfg.netbox.site}' existiert nicht in Netbox")
 
+    # Wazuh zuerst: dessen OS-Angaben sind genauer als Intunes "Windows"; Intune ergänzt Hersteller und Modell.
     raw: list[Asset] = []
-    if cfg.intune.enabled:
-        raw += intune_assets(ctx)
-        ctx.log.info("Intune: %s Geräte", len(raw))
     if cfg.wazuh.enabled:
-        wz = wazuh_assets(ctx)
-        ctx.log.info("Wazuh: %s Agents mit Inventar", len(wz))
-        raw += wz
+        raw += wazuh_assets(ctx)
+        ctx.log.info("Wazuh: %s Agents mit Inventar", len(raw))
+    if cfg.intune.enabled:
+        it = intune_assets(ctx)
+        ctx.log.info("Intune: %s Geräte", len(it))
+        raw += it
     assets = merge_assets(raw)
     ctx.log.info("%s Maschinen nach Zusammenführung", len(assets))
 
     index = NetboxIndex(nb)
-    stats = {"gefunden": len(assets), "bekannt": 0, "vorgeschlagen": 0, "ignoriert": 0}
+    stats = {"gefunden": len(assets), "bekannt": 0, "vorgeschlagen": 0, "anzupassen": 0, "ignoriert": 0}
     for asset in assets:
         if not asset.name:
             continue
-        hit = index.match(asset)
-        if hit is None and cfg.intune.enabled and cfg.intune.fetch_ethernet_mac and "intune" in asset.sources:
-            mac = norm_mac(ctx.intune.ethernet_mac(asset.sources["intune"]["id"]))
+        found = index.find(asset)
+        wants_mac = found is None or bool({"missing", "network"} & set(cfg.netbox.sync))
+        if wants_mac and cfg.intune.enabled and cfg.intune.fetch_ethernet_mac and "intune" in asset.sources:
+            mac = _ethernet_mac(ctx, asset.sources["intune"]["id"])
             if mac and mac not in asset.macs:
-                asset.interfaces.append(Iface(name="Ethernet", mac=mac))
-            hit = index.match(asset)
-        if hit:
+                asset.interfaces.append(Iface(name="Ethernet", mac=mac, identifies=False))
+        if found is None and asset.macs & index.orphan_macs:
+            ctx.log.info("%s: MAC %s existiert in Netbox ohne Zuordnung – keine Neuanlage", asset.name,
+                         ", ".join(sorted(asset.macs & index.orphan_macs)))
             stats["bekannt"] += 1
+            continue
+        if found:
+            stats["bekannt"] += 1
+            if cfg.netbox.sync:
+                from doku_agent.netbox_sync import propose_sync
+                if propose_sync(ctx, asset, found, index):
+                    stats["anzupassen"] += 1
             continue
         dedup = f"netbox:{asset.key}"
         if ctx.store.is_ignored(dedup):

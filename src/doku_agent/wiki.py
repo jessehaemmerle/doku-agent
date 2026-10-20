@@ -21,6 +21,10 @@ class WikiError(RuntimeError):
     pass
 
 
+class PageNotFound(WikiError):
+    """Die Seite existiert nicht (Wiki.js: "This page does not exist.")."""
+
+
 @dataclass
 class PageInfo:
     id: int
@@ -73,7 +77,10 @@ class WikiClient:
             raise WikiError(f"Wiki.js HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()
         if data.get("errors"):
-            raise WikiError("; ".join(e.get("message", str(e)) for e in data["errors"]))
+            message = "; ".join(e.get("message", str(e)) for e in data["errors"])
+            if "does not exist" in message.lower():
+                raise PageNotFound(message)
+            raise WikiError(message)
         return data["data"]
 
     @staticmethod
@@ -112,7 +119,7 @@ class WikiClient:
     def get_page(self, page_id: int) -> Page:
         data = self._gql(f"query($id: Int!) {{ pages {{ single(id: $id) {{ {_PAGE_FIELDS} }} }} }}", {"id": page_id})
         if not data["pages"]["single"]:
-            raise WikiError(f"Seite {page_id} nicht gefunden")
+            raise PageNotFound(f"Seite {page_id} nicht gefunden")
         return self._page(data["pages"]["single"])
 
     def get_page_by_path(self, path: str) -> Page | None:
@@ -122,11 +129,8 @@ class WikiClient:
                 f"{{ {_PAGE_FIELDS} }} }} }}",
                 {"path": normalize_path(path), "locale": self.cfg.locale},
             )
-        except WikiError as exc:
-            # Wiki.js meldet eine fehlende Seite als GraphQL-Fehler.
-            if "not exist" in str(exc).lower() or "not found" in str(exc).lower():
-                return None
-            raise
+        except PageNotFound:  # Wiki.js meldet eine fehlende Seite als GraphQL-Fehler
+            return None
         page = data["pages"]["singleByPath"]
         return self._page(page) if page else None
 

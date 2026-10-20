@@ -116,6 +116,15 @@ class NetboxConfig(BaseModel):
     vm_cluster: int | None = None  # Optional: Cluster-ID für neu erkannte VMs
     assign_ips: bool = True
     set_primary_ip: bool = True
+    # Abgleich bereits eingetragener Maschinen (leer = aus):
+    #   missing  – leere Felder füllen, fehlende Interfaces/MACs/IPs ergänzen
+    #   os       – Plattform nach OS-Wechsel, vCPU/RAM von VMs
+    #   network  – geänderte IPs, MAC-Wechsel, primäre IP
+    #   rename   – neuer Hostname bei gleicher Seriennummer/MAC
+    sync: list[Literal["missing", "os", "network", "rename"]] = Field(
+        default_factory=lambda: ["missing", "os", "network", "rename"])
+    # RAM-Abweichung (in %), ab der eine Anpassung vorgeschlagen wird – das OS meldet etwas weniger als zugewiesen.
+    memory_tolerance_percent: int = 10
 
 
 class WazuhConfig(BaseModel):

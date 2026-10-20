@@ -159,6 +159,16 @@ button:hover { filter: brightness(1.05); }
 .grid-jobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: .6rem; }
 .grid-jobs button { width: 100%; text-align: left; font-weight: 500; background: var(--sheet); }
 
+.table-scroll { overflow-x: auto; }
+table.changes { border-collapse: collapse; width: 100%; font-size: .95rem; }
+table.changes th, table.changes td { text-align: left; padding: .55rem .6rem; border-top: 1px solid var(--rule); vertical-align: top; }
+table.changes thead th { border-top: 0; color: var(--ink-soft); font-weight: 600; font-size: .85rem; }
+table.changes td:first-child { width: 1%; text-align: center; }
+table.changes input[type=checkbox] { width: 1.1rem; height: 1.1rem; accent-color: var(--ins); }
+table.changes label { margin: 0; display: inline; }
+table.changes .sub { display: block; color: var(--ink-soft); font-size: .85rem; }
+table.changes .before { color: var(--del); text-decoration: line-through; text-decoration-color: var(--del); overflow-wrap: break-word; }
+table.changes .after { color: var(--ins); font-weight: 600; overflow-wrap: break-word; }
 table.kv { border-collapse: collapse; width: 100%; background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; }
 table.kv th, table.kv td { text-align: left; padding: .5rem .75rem; border-top: 1px solid var(--rule); vertical-align: top; }
 table.kv tr:first-child th, table.kv tr:first-child td { border-top: 0; }
@@ -176,5 +186,12 @@ code { font-family: var(--mono); font-size: .9em; }
   .desk { position: static; }
   .list > a, .list > div { grid-template-columns: 3rem minmax(0, 1fr); }
   .list .status { grid-column: 2; justify-self: start; }
+  /* Schmale Bildschirme: jede Änderung als Karte – Häkchen + Bezeichnung, darunter vorher/nachher */
+  table.changes thead { display: none; }
+  table.changes, table.changes tbody { display: block; }
+  table.changes tr { display: grid; grid-template-columns: 2rem minmax(0, 1fr); padding: .6rem 0; border-top: 1px solid var(--rule); }
+  table.changes td { display: block; border: 0; padding: .1rem .25rem; width: auto; }
+  table.changes td:first-child { grid-row: span 3; width: auto; }
+  table.changes td.before, table.changes td.after { grid-column: 2; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

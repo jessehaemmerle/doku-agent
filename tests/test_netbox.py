@@ -136,10 +136,19 @@ def test_build_plan_old_netbox_puts_mac_on_interface(tmp_path):
 
 def test_netbox_index_matches(nb, nb_fake):
     nb_fake.add("dcim/devices", {"name": "srv01.firma.local", "serial": "ABC"})
+    sw = nb_fake.add("dcim/devices", {"name": "sw01"})
     nb_fake.add("dcim/mac-addresses", {"mac_address": "AA:BB:CC:DD:EE:FF",
-                                       "assigned_object": {"device": {"name": "sw01"}}})
+                                       "assigned_object": {"device": {"id": sw["id"], "name": "sw01"}}})
     index = NetboxIndex(nb)
     assert "Seriennummer" in index.match(Asset(name="x", serial="abc"))
     assert "Hostname" in index.match(Asset(name="SRV01"))
     assert "MAC" in index.match(Asset(name="y", interfaces=[Iface("e", "AA:BB:CC:DD:EE:FF")]))
     assert index.match(Asset(name="neu")) is None
+
+
+def test_netbox_slug_has_no_dots():
+    from doku_agent.discovery import netbox_slug
+    assert netbox_slug("Ubuntu 24.04") == "ubuntu-24-04"
+    assert netbox_slug("Dell Inc.") == "dell-inc"
+    assert netbox_slug("Virtual Machine 7.0") == "virtual-machine-7-0"
+    assert len(netbox_slug("x" * 300)) == 100

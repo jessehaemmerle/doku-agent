@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from doku_agent import markdown
 from doku_agent.context import Context
 from doku_agent.conventions import AreaProfile, slugify
-from doku_agent.wiki import Page, normalize_path
+from doku_agent.wiki import Page, PageNotFound, normalize_path
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
@@ -37,6 +37,10 @@ class PageDraft:
     ops: list[dict] = field(default_factory=list)  # LLM-Ergänzungen für bestehende Seiten
     source: str = ""
     hints: list[str] = field(default_factory=list)
+    # Stabile Kennung des Quellobjekts (z.B. "netbox:device:4"): Die einmal angelegte Seite wird
+    # darüber wiedergefunden, auch wenn das Objekt umbenannt wurde.
+    stable_id: str | None = None
+    sync_title: bool = False  # Seitentitel folgt dem Objektnamen (z.B. nach Umbenennung)
 
 
 def sha(text: str) -> str:
@@ -88,6 +92,13 @@ def _resolve_target(ctx: Context, draft: PageDraft) -> tuple[str, Page | None, A
     if draft.target_page_id:
         page = ctx.wiki.get_page(draft.target_page_id)
         return page.path, page, conv.profile_for_path(page.path), hints
+    mapped = ctx.store.kv_get(f"page-for:{draft.stable_id}") if draft.stable_id else None
+    if mapped:
+        try:
+            page = ctx.wiki.get_page(int(mapped))
+            return page.path, page, conv.profile_for_path(page.path), hints
+        except PageNotFound:  # nur bei wirklich gelöschter Seite; andere Fehler brechen ab
+            ctx.store.kv_set(f"page-for:{draft.stable_id}", None)
     if draft.target_path:
         path = normalize_path(draft.target_path)
     else:
@@ -105,7 +116,20 @@ def _resolve_target(ctx: Context, draft: PageDraft) -> tuple[str, Page | None, A
             path = existing.path
     profile = conv.profile_for_path(path)
     page = ctx.wiki.get_page(existing.id) if existing else None
+    if page is not None and draft.stable_id:
+        # Zuordnung sofort merken, damit die Seite auch nach einer Umbenennung gefunden wird
+        ctx.store.kv_set(f"page-for:{draft.stable_id}", page.id)
     return path, page, profile, hints
+
+
+def _convention_hint(profile: AreaProfile, path: str) -> str:
+    if profile.inherited:
+        return profile.summary()
+    if profile.page_count:
+        return ("Konventionen aus /" + profile.prefix + " übernommen: "
+                + (", ".join(f"Tag '{t}'" for t in profile.common_tags) or "keine gemeinsamen Tags")
+                + (f"; Pflichtabschnitte: {', '.join(profile.required_sections)}" if profile.required_sections else ""))
+    return f"Für /{path} gibt es noch keinen Bereich mit Vorbildseiten – Standardvorlage verwendet."
 
 
 def propose_page(ctx: Context, draft: PageDraft) -> int | None:
@@ -114,17 +138,10 @@ def propose_page(ctx: Context, draft: PageDraft) -> int | None:
     if ctx.store.is_ignored(f"wiki:{path}"):
         ctx.log.info("/%s steht auf der Ignorierliste – kein Vorschlag", path)
         return None
-    tags =list(dict.fromkeys([*ctx.cfg.wiki.tags.get(draft.doc_type, []), *profile.common_tags, *draft.extra_tags]))
+    tags = list(dict.fromkeys([*ctx.cfg.wiki.tags.get(draft.doc_type, []), *profile.common_tags, *draft.extra_tags]))
     hints = [*draft.hints, *hints]
-    if profile.inherited:
-        hints.append(profile.summary())
-    elif profile.page_count:
-        hints.append("Konventionen aus /" + profile.prefix + " übernommen: "
-                     + (", ".join(f"Tag '{t}'" for t in profile.common_tags) or "keine gemeinsamen Tags")
-                     + (f"; Pflichtabschnitte: {', '.join(profile.required_sections)}"
-                        if profile.required_sections else ""))
-    else:
-        hints.append(f"Für /{path} gibt es noch keinen Bereich mit Vorbildseiten – Standardvorlage verwendet.")
+    if page is None:  # Konventions-Hinweise nur für neue Seiten; bei bestehenden gilt deren Aufbau
+        hints.append(_convention_hint(profile, path))
 
     if page is not None and page.content_type != "markdown":
         ctx.log.warning("Seite /%s ist kein Markdown (%s) – übersprungen", page.path, page.content_type)
@@ -143,11 +160,15 @@ def propose_page(ctx: Context, draft: PageDraft) -> int | None:
         hints += notes
         merged_tags = list(dict.fromkeys([*page.tags, *tags]))
         description = page.description or draft.description
-        if content == page.content and merged_tags == page.tags and description == page.description:
+        title = draft.title if draft.sync_title and draft.title else page.title
+        if (content == page.content and merged_tags == page.tags and description == page.description
+                and title == page.title):
             ctx.log.info("/%s ist bereits aktuell – kein Vorschlag", page.path)
             return None
+        if title != page.title:
+            hints.append(f"Titel wird von '{page.title}' auf '{title}' geändert; die Seite bleibt unter /{page.path}.")
         payload = {
-            "action": "update", "page_id": page.id, "path": page.path, "title": page.title,
+            "action": "update", "page_id": page.id, "path": page.path, "title": title,
             "description": description, "tags": merged_tags, "content": content,
             "base_hash": sha(page.content), "blocks": [b.__dict__ for b in draft.blocks], "ops": draft.ops,
         }
@@ -157,6 +178,7 @@ def propose_page(ctx: Context, draft: PageDraft) -> int | None:
         summary = f"Ergänzung von /{page.path}"
 
     payload["hints"] = hints
+    payload["stable_id"] = draft.stable_id
     return ctx.store.add_proposal(
         "wiki_page", draft.title, payload, summary=summary, diff=diff, source=draft.source,
         dedup_key=f"wiki:{path}",
