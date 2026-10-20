@@ -22,6 +22,7 @@ ALLOWED_ENDPOINTS = {
     "dcim/manufacturers", "dcim/device-types", "dcim/device-roles", "dcim/platforms", "dcim/devices",
     "dcim/interfaces", "dcim/mac-addresses", "ipam/ip-addresses",
     "virtualization/virtual-machines", "virtualization/interfaces",
+    "extras/custom-fields",  # nur für das einmalige Anlegen der Agent-Felder
 }
 ACTIONS = {"create", "ensure", "update"}
 
@@ -86,6 +87,26 @@ def comparable(value):
     return value
 
 
+def field_value(obj: dict, name: str):
+    """Feldwert inkl. Custom Fields: "custom_fields.last_seen" liest obj["custom_fields"]["last_seen"]."""
+    if name.startswith("custom_fields."):
+        return comparable((obj.get("custom_fields") or {}).get(name.split(".", 1)[1]))
+    return comparable(obj.get(name))
+
+
+def _snapshot(before: dict, data: dict) -> dict:
+    """Bisherige Werte der Felder, die ein Update ändert. Custom Fields einzeln, denn Netbox
+    führt ein PATCH von custom_fields mit den bestehenden Werten zusammen."""
+    old = {}
+    for key, value in data.items():
+        if key == "custom_fields" and isinstance(value, dict):
+            current = before.get("custom_fields") or {}
+            old[key] = {name: comparable(current.get(name)) for name in value}
+        else:
+            old[key] = comparable(before.get(key))
+    return old
+
+
 def execute_plan(nb: NetboxClient, steps: list[dict], log: logging.Logger) -> dict[str, tuple[str, int]]:
     """Führt den Plan aus. Bei einem Fehler wird alles rückgängig gemacht: angelegte Objekte werden
     gelöscht, geänderte Felder bestehender Objekte auf den vorherigen Wert zurückgesetzt."""
@@ -117,7 +138,7 @@ def execute_plan(nb: NetboxClient, steps: list[dict], log: logging.Logger) -> di
                 oid = int(_resolve(step["id"], ids))
                 if (endpoint, oid) not in created:  # in diesem Lauf angelegte Objekte werden ohnehin gelöscht
                     before = nb.get(endpoint, oid)
-                    undo.append(("restore", endpoint, oid, {k: comparable(before.get(k)) for k in data}))
+                    undo.append(("restore", endpoint, oid, _snapshot(before, data)))
                 nb.update(endpoint, oid, data)
                 log.info("Schritt %s: %s #%s aktualisiert", idx, endpoint, oid)
             if step.get("ref"):

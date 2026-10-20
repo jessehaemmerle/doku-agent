@@ -74,6 +74,9 @@ class WikiConfig(BaseModel):
         "wazuh_sca": "security/wazuh/sca/{name}",
         "intune_policy": "clients/intune/{category}/{name}",
         "intune_apps": "clients/intune/apps",
+        "intune_groups": "clients/intune/gruppen",
+        "fortigate": "netzwerk/firewall/{device}/{section}",
+        "wiki_lint": "wartung/wiki-lint",
     })
     # Zusätzliche Tags je Dokutyp (gelernte Tags aus dem Wiki kommen dazu).
     tags: dict[str, list[str]] = Field(default_factory=lambda: {
@@ -84,6 +87,9 @@ class WikiConfig(BaseModel):
         "wazuh_sca": ["wazuh", "sca"],
         "intune_policy": ["intune"],
         "intune_apps": ["intune"],
+        "intune_groups": ["intune"],
+        "fortigate": ["firewall", "fortigate"],
+        "wiki_lint": [],
     })
     # Wie viele Seiten pro Bereich zum Lernen der Konventionen gelesen werden.
     convention_sample_pages: int = 5
@@ -92,6 +98,15 @@ class WikiConfig(BaseModel):
 class NetboxRoleRule(BaseModel):
     os: str = ".*"  # Regex auf Betriebssystem-Name
     role: str  # Slug der Geräterolle
+
+
+class NetboxCustomFields(BaseModel):
+    """Custom Fields für die feste Zuordnung zu Wazuh/Intune. Fehlen sie in Netbox, schlägt die
+    Discovery einmalig vor, sie anzulegen."""
+    enabled: bool = True
+    wazuh_agent_id: str = "wazuh_agent_id"
+    intune_device_id: str = "intune_device_id"
+    last_seen: str = "last_seen"  # wird ohne Freigabe gepflegt (einzige Ausnahme)
 
 
 class NetboxConfig(BaseModel):
@@ -125,6 +140,7 @@ class NetboxConfig(BaseModel):
         default_factory=lambda: ["missing", "os", "network", "rename"])
     # RAM-Abweichung (in %), ab der eine Anpassung vorgeschlagen wird – das OS meldet etwas weniger als zugewiesen.
     memory_tolerance_percent: int = 10
+    custom_fields: NetboxCustomFields = Field(default_factory=NetboxCustomFields)
 
 
 class WazuhConfig(BaseModel):
@@ -146,13 +162,48 @@ class IntuneConfig(BaseModel):
     client_id: str = ""
     client_secret: str = ""
     resolve_group_names: bool = True
-    include: list[Literal["compliance", "configurations", "settings_catalog", "apps"]] = Field(
-        default_factory=lambda: ["compliance", "configurations", "settings_catalog", "apps"]
+    # groups = Übersichtsseite der Entra-Gruppen mit Mitgliederzahlen und allen Zuweisungen
+    include: list[Literal["compliance", "configurations", "settings_catalog", "apps", "groups"]] = Field(
+        default_factory=lambda: ["compliance", "configurations", "settings_catalog", "apps", "groups"]
     )
     # Ethernet-MAC gibt Graph nur per Einzelabfrage heraus.
     fetch_ethernet_mac: bool = True
     # Welche Betriebssysteme die Netbox-Discovery übernimmt (leer = alle, z.B. auch Handys).
     discovery_os: list[str] = Field(default_factory=lambda: ["Windows", "macOS", "Linux"])
+
+
+class FortiGateDevice(BaseModel):
+    name: str  # Kurzname für Wiki-Pfad und Titel, z.B. fw-zentrale
+    url: str  # https://fw.example.local (ggf. mit Admin-Port)
+    token: str  # REST-API-Admin mit Profil nur lesend
+    verify_tls: TlsVerify = True
+    vdoms: list[str] = Field(default_factory=lambda: ["root"])
+
+
+class FortiGateConfig(BaseModel):
+    enabled: bool = False
+    devices: list[FortiGateDevice] = Field(default_factory=list)
+    include: list[Literal["policies", "nat", "objects", "network", "vpn"]] = Field(
+        default_factory=lambda: ["policies", "nat", "objects", "network", "vpn"])
+
+
+class EmbeddingsConfig(BaseModel):
+    """Lokale Embeddings (über dasselbe Ollama) für semantische Suche und Fragen ans Wiki."""
+    enabled: bool = True
+    model: str = "qwen3-embedding:0.6b"
+    chunk_chars: int = 1500  # Abschnitte werden auf diese Länge (Zeichen) zerlegt
+    batch_size: int = 16
+    top_k: int = 6  # Auszüge pro Frage
+    # Qwen3-Embedding erwartet bei Suchanfragen eine Anweisung; für andere Modelle (z.B. bge-m3) leer lassen.
+    query_prefix: str = "Instruct: Given a question, retrieve wiki passages that answer the question\nQuery: "
+    keep_alive: str = "30m"
+
+
+class LintConfig(BaseModel):
+    report_page: bool = True  # Bericht zusätzlich als Wiki-Seite (Vorschlag)
+    refresh_stale: bool = True  # veraltete Seiten über den passenden Generator neu vorschlagen
+    duplicate_threshold: float = 0.93  # Ähnlichkeit (Embeddings), ab der Seiten als mögliche Dubletten gelten
+    exclude_paths: list[str] = Field(default_factory=list)  # Pfad-Präfixe, die nicht geprüft werden
 
 
 class ScheduleEntry(BaseModel):
@@ -189,6 +240,9 @@ class Config(BaseModel):
     netbox: NetboxConfig = Field(default_factory=NetboxConfig)
     wazuh: WazuhConfig = Field(default_factory=WazuhConfig)
     intune: IntuneConfig = Field(default_factory=IntuneConfig)
+    fortigate: FortiGateConfig = Field(default_factory=FortiGateConfig)
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
+    lint: LintConfig = Field(default_factory=LintConfig)
     schedule: list[ScheduleEntry] = Field(default_factory=list)
     web: WebConfig = Field(default_factory=WebConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)

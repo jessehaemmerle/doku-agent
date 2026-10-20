@@ -32,6 +32,9 @@ wiki:
     wazuh_sca: security/wazuh/sca/{name}
     intune_policy: clients/intune/{category}/{name}   # {category}: compliance, konfigurationsprofile, settings-catalog
     intune_apps: clients/intune/apps
+    intune_groups: clients/intune/gruppen             # Entra-Gruppen mit Mitgliederzahlen und Zuweisungen
+    fortigate: netzwerk/firewall/{device}/{section}   # {section}: regeln, nat, objekte, netzwerk, vpn; optional {vdom}
+    wiki_lint: wartung/wiki-lint                      # Bericht des Wiki-Lint
   tags:
     netbox_device: [netbox]
     wazuh_rules: [wazuh]
@@ -40,6 +43,9 @@ wiki:
     wazuh_sca: [wazuh, sca]
     intune_policy: [intune]
     intune_apps: [intune]
+    intune_groups: [intune]
+    fortigate: [firewall, fortigate]
+    wiki_lint: []
   convention_sample_pages: 5
 
 netbox:
@@ -63,6 +69,13 @@ netbox:
   #   missing = Leeres füllen, os = Plattform/VM-Ressourcen, network = IPs/MACs, rename = Hostname
   sync: [missing, os, network, rename]
   memory_tolerance_percent: 10 # RAM-Abweichung, ab der angepasst wird (OS meldet weniger als zugewiesen)
+  # Custom Fields für feste Zuordnung (Wiedererkennung zuerst über diese IDs). Fehlen sie, schlägt die
+  # Discovery einmalig vor, sie anzulegen. IDs werden mit Freigabe gesetzt, last_seen täglich ohne Freigabe.
+  custom_fields:
+    enabled: true
+    wazuh_agent_id: wazuh_agent_id
+    intune_device_id: intune_device_id
+    last_seen: last_seen
 
 wazuh:
   enabled: true
@@ -80,10 +93,34 @@ intune:
   tenant_id: ${INTUNE_TENANT_ID}
   client_id: ${INTUNE_CLIENT_ID}
   client_secret: ${INTUNE_CLIENT_SECRET}
-  resolve_group_names: true    # braucht Group.Read.All
-  include: [compliance, configurations, settings_catalog, apps]
+  resolve_group_names: true    # braucht Group.Read.All (Namen, Art, Mitgliederzahlen)
+  include: [compliance, configurations, settings_catalog, apps, groups]   # groups = Übersicht der Entra-Gruppen
   fetch_ethernet_mac: true
   discovery_os: [Windows, macOS, Linux]   # leer = alle (auch iOS/Android)
+
+fortigate:
+  enabled: false
+  devices:                     # REST-API-Admin mit Admin-Profil "nur lesen", Token in .env
+    - name: fw-zentrale        # Kurzname für Pfad und Titel
+      url: https://fw-zentrale.example.local:8443
+      token: ${FORTIGATE_TOKEN:-}
+      verify_tls: true         # oder Pfad zur internen CA
+      vdoms: [root]            # mehrere VDOMs: je VDOM eigene Seiten
+  include: [policies, nat, objects, network, vpn]
+
+# Lokale Embeddings (gleiches Ollama) für Fragen ans Wiki und bessere Seitenwahl bei freien Aufträgen
+embeddings:
+  enabled: true
+  model: qwen3-embedding:0.6b  # mehrsprachig, ca. 640 MB; Alternative: bge-m3 (dann query_prefix: "")
+  chunk_chars: 1500
+  top_k: 6
+  query_prefix: "Instruct: Given a question, retrieve wiki passages that answer the question\nQuery: "
+
+lint:
+  report_page: true            # Bericht zusätzlich als Wiki-Seite (Vorschlag)
+  refresh_stale: true          # veraltete Seiten neu vorschlagen
+  duplicate_threshold: 0.93    # ab dieser inhaltlichen Ähnlichkeit gelten Seiten als mögliche Dubletten
+  exclude_paths: []            # z.B. [archiv]
 
 # Nächtliche Läufe. Ergebnisse landen als Vorschläge in der Freigabe-Liste.
 schedule:
@@ -93,6 +130,9 @@ schedule:
   - {job: wazuh_config, at: "03:00"}
   - {job: wazuh_sca, at: "03:30", days: [0]}   # nur montags
   # - {job: intune, at: "04:00"}
+  # - {job: fortigate, at: "04:30"}
+  - {job: wiki_index, at: "05:30"}             # Suchindex für Fragen ans Wiki
+  - {job: wiki_lint, at: "06:00", days: [6]}   # sonntags
 
 web:
   host: 0.0.0.0

@@ -173,6 +173,7 @@ table.kv { border-collapse: collapse; width: 100%; background: var(--sheet); bor
 table.kv th, table.kv td { text-align: left; padding: .5rem .75rem; border-top: 1px solid var(--rule); vertical-align: top; }
 table.kv tr:first-child th, table.kv tr:first-child td { border-top: 0; }
 table.kv th { width: 30%; font-weight: 600; }
+.answer p { max-width: 75ch; white-space: pre-wrap; }
 .ok { color: var(--ins); font-weight: 700; }
 .bad { color: var(--del); font-weight: 700; }
 code { font-family: var(--mono); font-size: .9em; }

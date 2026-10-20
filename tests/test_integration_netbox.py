@@ -173,3 +173,85 @@ def test_update_rollback_against_real_netbox(nb):
     with pytest.raises(Exception, match="zurückgesetzt"):
         execute_plan(client, steps, log)
     assert client.get("dcim/devices", dev["id"])["serial"] == "ALT"
+
+
+def test_custom_fields_against_real_netbox(nb, ctx):
+    from doku_agent import discovery, netbox_fields
+    from doku_agent.apply import apply_proposal
+    from doku_agent.netbox_sync import propose_sync
+
+    client, cfg, site, created = nb
+    ctx.__dict__["netbox"] = client
+    sfx = uuid.uuid4().hex[:6]
+    cf = cfg.netbox.custom_fields
+    cf.wazuh_agent_id, cf.intune_device_id, cf.last_seen = f"it_wazuh_{sfx}", f"it_intune_{sfx}", f"it_seen_{sfx}"
+    ctx.cfg.netbox = cfg.netbox
+    fields = []
+    try:
+        # 1. Felder fehlen -> Vorschlag -> nach Freigabe angelegt
+        fs = netbox_fields.status(client, cf)
+        assert len(fs.steps) == 3
+        assert apply_proposal(ctx, netbox_fields.propose_setup(ctx, fs)) == "applied"
+        fields = [f for f in client.list("extras/custom-fields") if f["name"].endswith(sfx)]
+        assert {f["name"] for f in fields} == {cf.wazuh_agent_id, cf.intune_device_id, cf.last_seen}
+        assert all(set(f["object_types"]) == {"dcim.device", "virtualization.virtualmachine"} for f in fields)
+        fs = netbox_fields.status(client, cf)
+        assert fs.steps == [] and fs.available["dcim/devices"] == {cf.wazuh_agent_id, cf.intune_device_id, cf.last_seen}
+
+        # 2. Neue Maschine bekommt IDs und "zuletzt gesehen" gleich beim Anlegen
+        octet = int(sfx[:2], 16) % 200 + 10
+        asset = Asset(name=f"cf-{sfx}", serial=f"CF{sfx}", os_name="Ubuntu", primary_ip=f"10.97.{octet}.10",
+                      interfaces=[Iface("eth0", f"02:00:00:03:{sfx[:2]}:{sfx[2:4]}", [f"10.97.{octet}.10/24"])],
+                      sources={"wazuh": {"agent_id": f"9{sfx[:3]}", "last_seen": "2026-10-18T10:00:00Z"}})
+        values = {ep: netbox_fields.values_for(asset.sources, cf, names, "UTC") for ep, names in fs.available.items()}
+        refs = execute_plan(client, build_plan(asset, client, cfg.netbox, site["id"], values)[0], log)
+        dev_id = refs["dev"][1]
+        created.append(("dcim/devices", dev_id))
+        created[:0] = [("ipam/ip-addresses", ip["id"]) for ip in client.list("ipam/ip-addresses", device_id=dev_id)]
+        dev = client.get("dcim/devices", dev_id)
+        assert dev["custom_fields"][cf.wazuh_agent_id] == f"9{sfx[:3]}"
+        assert dev["custom_fields"][cf.last_seen] == "2026-10-18"
+
+        # 3. Wiedererkennung über die Agent-ID trotz neuem Namen und ohne Seriennummer
+        moved = Asset(name=f"ganz-anders-{sfx}", sources={"wazuh": {"agent_id": f"9{sfx[:3]}",
+                                                                      "last_seen": "2026-10-20T08:00:00Z"},
+                                                            "intune": {"id": f"intune-{sfx}"}})
+        index = NetboxIndex(client, cf)
+        found = index.find(moved)
+        assert found == ("dcim/devices", dev_id, "wazuh_id")
+
+        # 4. "zuletzt gesehen" direkt, andere Custom Fields bleiben erhalten (PATCH führt zusammen)
+        assert discovery.update_last_seen(ctx, moved, found, index)
+        dev = client.get("dcim/devices", dev_id)
+        assert dev["custom_fields"][cf.last_seen] == "2026-10-20"
+        assert dev["custom_fields"][cf.wazuh_agent_id] == f"9{sfx[:3]}"
+
+        # 5. Intune-ID als freigebbare Änderung; Umbenennung abgewählt
+        assert propose_sync(ctx, moved, found, NetboxIndex(client, cf))
+        prop = ctx.store.list_proposals("pending")[0]
+        keys = {c["key"] for c in prop.payload["changes"]}
+        assert f"cf:{cf.intune_device_id}" in keys and "name" in keys
+        ctx.store.update_proposal(prop.id, payload={**prop.payload, "selected": [f"cf:{cf.intune_device_id}"]})
+        assert apply_proposal(ctx, prop.id) == "applied"
+        dev = client.get("dcim/devices", dev_id)
+        assert dev["custom_fields"][cf.intune_device_id] == f"intune-{sfx}" and dev["name"] == asset.name
+        assert dev["custom_fields"][cf.last_seen] == "2026-10-20"
+
+        # 6. Rollback setzt nur das geänderte Custom Field zurück
+        steps = [{"action": "update", "endpoint": "dcim/devices", "id": dev_id,
+                  "data": {"custom_fields": {cf.wazuh_agent_id: "kaputt"}}},
+                 {"action": "create", "endpoint": "ipam/ip-addresses", "data": {"address": "999.1.1.1/24"}}]
+        with pytest.raises(Exception, match="zurückgesetzt"):
+            execute_plan(client, steps, log)
+        dev = client.get("dcim/devices", dev_id)
+        assert dev["custom_fields"][cf.wazuh_agent_id] == f"9{sfx[:3]}"
+        assert dev["custom_fields"][cf.intune_device_id] == f"intune-{sfx}"
+    finally:
+        for endpoint, oid in reversed(created):
+            try:
+                client.delete(endpoint, oid)
+            except Exception:
+                pass
+        created.clear()
+        for f in fields or [f for f in client.list("extras/custom-fields") if f["name"].endswith(sfx)]:
+            client.delete("extras/custom-fields", f["id"])

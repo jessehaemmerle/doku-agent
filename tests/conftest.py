@@ -70,6 +70,12 @@ class FakeWiki:
             data = {"pages": {"single": self._full(self.pages[v["id"]])}}
         elif "search(" in q:
             data = {"pages": {"search": {"results": []}}}
+        elif "links(" in q:  # wie Wiki.js: interne Links je Seite als "locale/pfad", auch auf fehlende Seiten
+            data = {"pages": {"links": [
+                {"id": p["id"], "path": f"de/{p['path']}", "title": p["title"],
+                 "links": [f"de/{m.removeprefix('de/')}" for m in re.findall(r"\]\(/([^)\s#]+)", p["content"])
+                           if "." not in m]}
+                for p in self.pages.values()]}}
         elif "create(" in q:
             pid = self.add(v["path"], v["title"], v["content"], v["tags"], v["description"])
             data = {"pages": {"create": {"responseResult": {"succeeded": True, "errorCode": 0, "slug": "ok",
@@ -95,6 +101,7 @@ class FakeNetbox:
         self.next_id = 100
         self.log: list[tuple[str, str]] = []
         self.fail_on: str | None = None  # Endpunkt, dessen POST fehlschlägt
+        self.forbidden: set[str] = set()  # Endpunkte ohne Leserecht (403)
 
     def add(self, endpoint: str, obj: dict) -> dict:
         self.next_id += 1
@@ -109,6 +116,8 @@ class FakeNetbox:
             return httpx.Response(200, json={"netbox-version": self.version})
         m = re.match(r"(.+?)/(\d+)$", path)
         endpoint, oid = (m.group(1), int(m.group(2))) if m else (path, None)
+        if endpoint in self.forbidden:
+            return httpx.Response(403, json={"detail": "You do not have permission to perform this action."})
         store = self.objects.setdefault(endpoint, {})
         if request.method == "GET" and oid is None:
             params = {k: v for k, v in request.url.params.items() if k not in ("limit", "offset")}
@@ -130,13 +139,18 @@ class FakeNetbox:
             results = [o for o in store.values() if all(matches(o, k, v) for k, v in params.items())]
             return httpx.Response(200, json={"count": len(results), "next": None, "results": results})
         if request.method == "GET":
+            if oid not in store:
+                return httpx.Response(404, json={"detail": "No Device matches the given query."})
             return httpx.Response(200, json=store[oid])
         if request.method == "POST":
             if self.fail_on == endpoint:
                 return httpx.Response(400, json={"detail": "kaputt"})
             return httpx.Response(201, json=self.add(endpoint, json.loads(request.content)))
         if request.method == "PATCH":
-            store[oid].update(json.loads(request.content))
+            body = json.loads(request.content)
+            if isinstance(body.get("custom_fields"), dict):  # Netbox führt Custom Fields zusammen
+                body["custom_fields"] = {**(store[oid].get("custom_fields") or {}), **body["custom_fields"]}
+            store[oid].update(body)
             return httpx.Response(200, json=store[oid])
         if request.method == "DELETE":
             store.pop(oid, None)

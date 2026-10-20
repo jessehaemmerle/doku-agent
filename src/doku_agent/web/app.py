@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 import uuid
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -76,6 +77,7 @@ def create_app(ctx: Context) -> FastAPI:
     templates = Jinja2Templates(directory=HERE / "templates")
     templates.env.globals.update(jobs=JOBS, status_labels=STATUS_LABELS, categories=CATEGORY_LABELS)
     security = HTTPBasic(realm="doku-agent")
+    ctx.store.reset_open_questions()  # nach einem Neustart hängengebliebene Fragen
 
     def auth(creds: HTTPBasicCredentials = Depends(security)) -> str:
         ok_user = secrets.compare_digest(creds.username.encode(), ctx.cfg.web.username.encode())
@@ -233,6 +235,44 @@ def create_app(ctx: Context) -> FastAPI:
                                              "files": saved, "upload_dir": str(upload_dir)})
         return _redirect(f"/jobs/{jid}", "Auftrag eingeplant. Das Ergebnis erscheint als Vorschlag.")
 
+    # --- Fragen ans Wiki ---------------------------------------------------
+
+    @app.get("/fragen", response_class=HTMLResponse)
+    def questions(request: Request, user: str = Depends(auth)):
+        from doku_agent import semantic
+        try:
+            ready = semantic.is_ready(ctx)
+        except Exception:
+            ready = False
+        return render(request, "questions.html", questions=ctx.store.list_questions(), ready=ready)
+
+    @app.post("/fragen")
+    def ask(_: None = Depends(check_csrf), user: str = Depends(auth), question: str = Form("")):
+        from doku_agent import semantic
+        if not ctx.cfg.embeddings.enabled:
+            return _redirect("/fragen", "Embeddings sind in der Konfiguration deaktiviert.", error=True)
+        text = question.strip()[:1000]
+        if not text:
+            return _redirect("/fragen", "Bitte eine Frage eingeben.", error=True)
+        qid = ctx.store.add_question(text)
+        threading.Thread(target=semantic.run_question, args=(ctx, qid), name=f"frage-{qid}", daemon=True).start()
+        return _redirect(f"/fragen/{qid}")
+
+    @app.get("/fragen/{qid}", response_class=HTMLResponse)
+    def question(request: Request, qid: int, user: str = Depends(auth)):
+        q = ctx.store.get_question(qid)
+        if q is None:
+            raise HTTPException(404, "Frage nicht gefunden")
+        return render(request, "question.html", q=q)
+
+    # --- Wiki-Lint ----------------------------------------------------------
+
+    @app.get("/wiki-lint", response_class=HTMLResponse)
+    def wiki_lint(request: Request, user: str = Depends(auth)):
+        from doku_agent.lint import REPORT_KEY
+        return render(request, "lint.html", report=ctx.store.kv_get(REPORT_KEY),
+                      page_url=ctx.wiki.page_url)
+
     # --- Konventionen & Status --------------------------------------------
 
     @app.get("/konventionen", response_class=HTMLResponse)
@@ -282,12 +322,40 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
         major, minor = ctx.netbox.version()
         return f"Version {major}.{minor}"
 
+    def netbox_fields():
+        from doku_agent import netbox_fields as nf
+        fs = nf.status(ctx.netbox, ctx.cfg.netbox.custom_fields)
+        if fs.steps:
+            raise RuntimeError("fehlen oder sind nicht für Geräte und VMs freigeschaltet – die Discovery schlägt "
+                               "das Anlegen vor")
+        if fs.hints:
+            raise RuntimeError(" ".join(fs.hints))
+        return "vorhanden: " + ", ".join(sorted(nf.field_names(ctx.cfg.netbox.custom_fields).values()))
+
+    def fortigate(dev):
+        info = ctx.fortigate(dev.name).system()
+        return f"{info['hostname']}, FortiOS {info['version']}"
+
+    def embeddings():
+        models = ctx.llm.models()
+        model = ctx.cfg.embeddings.model
+        if model not in models and f"{model}:latest" not in models:
+            raise RuntimeError(f"Modell {model} fehlt (docker compose --profile setup run --rm ollama-pull)")
+        return f"Modell {model} vorhanden"
+
     check("Sprachmodell (Ollama)", llm)
+    if ctx.cfg.embeddings.enabled:
+        check("Embedding-Modell (Ollama)", embeddings)
     check("Wiki.js", lambda: f"{len(ctx.wiki.list_pages())} Seiten lesbar")
     if ctx.cfg.netbox.enabled:
         check("Netbox", netbox)
+        if ctx.cfg.netbox.custom_fields.enabled:
+            check("Netbox Custom Fields", netbox_fields)
     if ctx.cfg.wazuh.enabled:
         check("Wazuh", lambda: f"{len(ctx.wazuh.agents())} Agents")
     if ctx.cfg.intune.enabled:
         check("Intune (Graph)", lambda: f"{len(ctx.intune.managed_devices())} verwaltete Geräte")
+    if ctx.cfg.fortigate.enabled:
+        for dev in ctx.cfg.fortigate.devices:
+            check(f"FortiGate {dev.name}", lambda dev=dev: fortigate(dev))
     return checks

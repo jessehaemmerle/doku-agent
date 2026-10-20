@@ -49,6 +49,11 @@ def document_object(ctx: Context, kind: str, obj_id: int) -> int | None:
         rows += [["Raum/Location", _n(obj.get("location"))], ["Rack / Position", position],
                  ["Hersteller", _n(dtype.get("manufacturer"))], ["Modell", dtype.get("model", "")],
                  ["Asset-Tag", obj.get("asset_tag") or ""]]
+    cf, values = ctx.cfg.netbox.custom_fields, obj.get("custom_fields") or {}
+    # Kennungen ja, "zuletzt gesehen" nicht: das ändert sich täglich und würde jede Nacht einen Vorschlag erzeugen
+    for field, label in ((cf.wazuh_agent_id, "Wazuh-Agent-ID"), (cf.intune_device_id, "Intune-Geräte-ID")):
+        if cf.enabled and values.get(field):
+            rows.append([label, values[field]])
     rows += [
         ["Seriennummer", obj.get("serial") or ""],
         ["Plattform", _n(obj.get("platform"))],

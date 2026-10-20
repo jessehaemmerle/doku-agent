@@ -9,7 +9,9 @@ from doku_agent.egress import EgressGuard
 
 
 class NetboxError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _clean(endpoint: str) -> str:
@@ -37,7 +39,8 @@ class NetboxClient:
         except httpx.HTTPError as exc:
             raise NetboxError(f"Netbox nicht erreichbar: {exc}") from exc
         if resp.status_code >= 400:
-            raise NetboxError(f"Netbox {method} {endpoint}: HTTP {resp.status_code} {resp.text[:500]}")
+            raise NetboxError(f"Netbox {method} {endpoint}: HTTP {resp.status_code} {resp.text[:500]}",
+                              resp.status_code)
         return resp
 
     def version(self) -> tuple[int, int]:

@@ -9,7 +9,7 @@ from doku_agent.config import Config
 from doku_agent.egress import EgressGuard
 from doku_agent.store import Store
 
-CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune")
+CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune", "embedder")
 
 
 class Context:
@@ -73,3 +73,20 @@ class Context:
         if not self.cfg.intune.enabled:
             raise RuntimeError("Intune ist in der Konfiguration deaktiviert")
         return self._shared("intune", lambda: IntuneClient(self.cfg.intune, self.guard))
+
+    @cached_property
+    def embedder(self):
+        from doku_agent.embeddings import Embedder
+        if not self.cfg.embeddings.enabled:
+            raise RuntimeError("Embeddings sind in der Konfiguration deaktiviert")
+        return self._shared("embedder", lambda: Embedder(self.cfg.embeddings, self.cfg.llm, self.guard))
+
+    def fortigate(self, name: str):
+        """Client für eine konfigurierte FortiGate (eigener Verbindungs-Pool je Gerät)."""
+        from doku_agent.connectors.fortigate import FortiGateClient
+        if not self.cfg.fortigate.enabled:
+            raise RuntimeError("FortiGate ist in der Konfiguration deaktiviert")
+        dev = next((d for d in self.cfg.fortigate.devices if d.name == name), None)
+        if dev is None:
+            raise RuntimeError(f"FortiGate {name!r} ist nicht konfiguriert")
+        return self._shared(f"fortigate:{name}", lambda: FortiGateClient(dev, self.guard))

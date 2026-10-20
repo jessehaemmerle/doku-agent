@@ -11,8 +11,8 @@ from doku_agent.context import Context
 
 # Nur das Ende des Feldnamens zählt: "preSharedKey" wird maskiert, "passwordMinimumLength" nicht.
 SECRET_NAME = re.compile(
-    r"(?i)(password|passwd|passphrase|secret|token|api_?key|hook_?url|pre_?shared_?key|psk|private_?key|"
-    r"credentials?|auth_?key|client_?key|shared_?key)$"
+    r"(?i)(password|passwd|passphrase|secret|token|api[_-]?key|hook[_-]?url|pre[_-]?shared[_-]?key|psk|"
+    r"private[_-]?key|credentials?|auth[_-]?key|client[_-]?key|shared[_-]?key)$"
 )
 MASK = "***"
 

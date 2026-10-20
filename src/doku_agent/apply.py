@@ -23,6 +23,12 @@ def _requeue(ctx: Context, prop: Proposal, payload: dict, old: str, new: str, re
     return reason
 
 
+def _reindex(ctx: Context, page_id: int) -> None:
+    """Geänderte Seite im Suchindex nachziehen (als Job, damit die Freigabe nicht auf das Modell wartet)."""
+    if ctx.cfg.embeddings.enabled:
+        ctx.store.enqueue("wiki_index", {"page_id": page_id})
+
+
 def apply_wiki(ctx: Context, prop: Proposal) -> str:
     payload = dict(prop.payload)
     wiki = ctx.wiki
@@ -45,6 +51,7 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
             ctx.store.kv_set(f"page-for:{payload['stable_id']}", page_id)
         ctx.store.update_proposal(prop.id, status="applied",
                                   result=f"Seite angelegt (ID {page_id}): {wiki.page_url(payload['path'])}")
+        _reindex(ctx, page_id)
         return "applied"
 
     page = wiki.get_page(int(payload["page_id"]))
@@ -61,6 +68,7 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
     if payload.get("stable_id"):
         ctx.store.kv_set(f"page-for:{payload['stable_id']}", page.id)
     ctx.store.update_proposal(prop.id, status="applied", result=f"Seite aktualisiert: {wiki.page_url(page.path)}")
+    _reindex(ctx, page.id)
     return "applied"
 
 
@@ -85,7 +93,7 @@ def selected_steps(ctx: Context, payload: dict) -> tuple[list[dict], list[str], 
     Eine Änderung wird übersprungen, wenn ihr Feld in Netbox seit dem Vorschlag geändert wurde –
     dann gewinnt die Handarbeit. Änderungen, die eine übersprungene voraussetzen, entfallen mit.
     """
-    from doku_agent.netbox_plan import comparable
+    from doku_agent.netbox_plan import field_value
 
     changes = payload["changes"]
     selected = set(payload.get("selected") or [c["key"] for c in changes])
@@ -101,7 +109,7 @@ def selected_steps(ctx: Context, payload: dict) -> tuple[list[dict], list[str], 
             key = (check["endpoint"], check["id"])
             if key not in objects:
                 objects[key] = ctx.netbox.get(*key)
-            current = comparable(objects[key].get(check["field"]))
+            current = field_value(objects[key], check["field"])
             if current != check["value"]:
                 dropped.add(c["key"])
                 skipped.append(f"{c['label']}: in Netbox inzwischen geändert – übersprungen")

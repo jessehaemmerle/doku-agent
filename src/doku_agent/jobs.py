@@ -44,6 +44,12 @@ def _intune(ctx: Context, params: dict):
     return document_intune(ctx)
 
 
+def _fortigate(ctx: Context, params: dict):
+    from doku_agent.generators.fortigate_docs import document_fortigate
+    sections = [s for s in params.get("sections", "").split(",") if s]
+    return document_fortigate(ctx, params.get("device", ""), params.get("vdom", ""), sections or None)
+
+
 def _netbox_device(ctx: Context, params: dict):
     from doku_agent.generators.netbox_docs import document_object
     return document_object(ctx, params.get("kind", "device"), int(params["id"]))
@@ -52,6 +58,17 @@ def _netbox_device(ctx: Context, params: dict):
 def _netbox_devices(ctx: Context, params: dict):
     from doku_agent.generators.netbox_docs import document_all
     return document_all(ctx, params.get("site", ""), params.get("role", ""))
+
+
+def _wiki_index(ctx: Context, params: dict):
+    from doku_agent.semantic import index_wiki
+    page_ids = [int(p) for p in str(params.get("page_id", "")).split(",") if p.strip()]
+    return index_wiki(ctx, page_ids or None)
+
+
+def _wiki_lint(ctx: Context, params: dict):
+    from doku_agent.lint import run_lint
+    return run_lint(ctx)
 
 
 def _freeform(ctx: Context, params: dict):
@@ -71,13 +88,17 @@ JOBS = {
     "wazuh_decoders": ("Wazuh: eigene Decoder", _wazuh_decoders),
     "wazuh_config": ("Wazuh: Manager- und Gruppen-Konfiguration", _wazuh_config),
     "wazuh_sca": ("Wazuh: SCA-Ergebnisse", _wazuh_sca),
-    "intune": ("Intune: Richtlinien, Profile, Apps", _intune),
+    "intune": ("Intune: Richtlinien, Profile, Apps, Gruppen", _intune),
+    "fortigate": ("FortiGate: Regeln, NAT, Objekte, Netzwerk, VPN", _fortigate),
     "netbox_device": ("Netbox: Steckbrief eines Geräts", _netbox_device),
     "netbox_devices": ("Netbox: Steckbriefe aller Geräte", _netbox_devices),
     "freeform": ("Freie Dokumentation", _freeform),
+    "wiki_index": ("Wiki: Suchindex aktualisieren", _wiki_index),
+    "wiki_lint": ("Wiki-Lint: Links, Dubletten, Tags, Aktualität", _wiki_lint),
 }
 # Jobs ohne Pflichtparameter, die über UI/CLI/Scheduler direkt gestartet werden können.
-STARTABLE = ["discovery", "wazuh_rules", "wazuh_decoders", "wazuh_config", "wazuh_sca", "intune", "netbox_devices"]
+STARTABLE = ["discovery", "wazuh_rules", "wazuh_decoders", "wazuh_config", "wazuh_sca", "intune", "fortigate",
+             "netbox_devices", "wiki_index", "wiki_lint"]
 
 
 class _JobLogHandler(logging.Handler):

@@ -16,6 +16,8 @@
       <li><a href="/vorschlaege" {% if here.startswith('/vorschlaege') %}aria-current="page"{% endif %}>Freigaben
         {% if pending %}<span class="count" aria-label="{{ pending }} offen">{{ pending }}</span>{% endif %}</a></li>
       <li><a href="/auftrag" {% if here == '/auftrag' %}aria-current="page"{% endif %}>Neuer Auftrag</a></li>
+      <li><a href="/fragen" {% if here.startswith('/fragen') %}aria-current="page"{% endif %}>Fragen</a></li>
+      <li><a href="/wiki-lint" {% if here == '/wiki-lint' %}aria-current="page"{% endif %}>Wiki-Lint</a></li>
       <li><a href="/jobs" {% if here.startswith('/jobs') %}aria-current="page"{% endif %}>Jobs</a></li>
       <li><a href="/konventionen" {% if here == '/konventionen' %}aria-current="page"{% endif %}>Konventionen</a></li>
       <li><a href="/status" {% if here == '/status' %}aria-current="page"{% endif %}>Status</a></li>

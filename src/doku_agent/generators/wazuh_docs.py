@@ -141,7 +141,7 @@ def document_rule_file(ctx: Context, file_info: dict) -> int | None:
         description=f"Eigene Wazuh-Regeln aus {filename}", blocks=blocks, path_vars={"name": name},
         intro=f"Dokumentation der eigenen Wazuh-Regeldatei `{filename}`. Die markierten Abschnitte werden "
               f"automatisch aus der Wazuh-API aktualisiert.",
-        source=f"wazuh:rules:{filename}", hints=hints,
+        source=f"wazuh:rules:{filename}", hints=hints, stable_id=f"wazuh:rules:{filename}",
     ))
 
 
@@ -173,7 +173,7 @@ def document_decoder_file(ctx: Context, file_info: dict) -> int | None:
                 Block("wazuh-decoders-raw", "Quelltext", f"```xml\n{raw.strip()}\n```")],
         path_vars={"name": name},
         intro=f"Dokumentation der eigenen Wazuh-Decoderdatei `{filename}`.",
-        source=f"wazuh:decoders:{filename}",
+        source=f"wazuh:decoders:{filename}", stable_id=f"wazuh:decoders:{filename}",
     ))
 
 
@@ -222,13 +222,23 @@ def _config_page(ctx: Context, raw: str, name: str, title: str, source: str, wha
         path_vars={"name": name},
         intro=f"Automatisch erzeugte Dokumentation der Wazuh {what}. Geheimnisse (Passwörter, API-Keys, "
               f"Webhooks) sind maskiert.",
-        source=source,
+        source=source, stable_id=source,
     ))
 
 
+def manager_page(ctx: Context) -> int | None:
+    return _config_page(ctx, ctx.wazuh.manager_config(), "manager", "Wazuh-Manager: Konfiguration",
+                        "wazuh:config:manager", "Manager-Konfiguration (ossec.conf)")
+
+
+def group_page(ctx: Context, gname: str, raw: str | None = None) -> int | None:
+    raw = ctx.wazuh.group_agent_conf(gname) if raw is None else raw
+    return _config_page(ctx, raw, f"gruppe-{gname}", f"Wazuh-Gruppe {gname}: agent.conf",
+                        f"wazuh:config:group:{gname}", f"Gruppen-Konfiguration (agent.conf) von '{gname}'")
+
+
 def document_config(ctx: Context) -> list[int | None]:
-    results = [_config_page(ctx, ctx.wazuh.manager_config(), "manager", "Wazuh-Manager: Konfiguration",
-                            "wazuh:config:manager", "Manager-Konfiguration (ossec.conf)")]
+    results = [manager_page(ctx)]
     if ctx.cfg.wazuh.document_groups:
         for group in ctx.wazuh.groups():
             gname = group.get("name", "")
@@ -237,16 +247,17 @@ def document_config(ctx: Context) -> list[int | None]:
             except Exception as exc:
                 ctx.log.warning("Gruppe %s: agent.conf nicht lesbar (%s)", gname, exc)
                 continue
-            results.append(_config_page(ctx, raw, f"gruppe-{gname}", f"Wazuh-Gruppe {gname}: agent.conf",
-                                        f"wazuh:config:group:{gname}", f"Gruppen-Konfiguration (agent.conf) von '{gname}'"))
+            results.append(group_page(ctx, gname, raw))
     return results
 
 
-def document_sca(ctx: Context) -> list[int | None]:
+def document_sca(ctx: Context, agent_id: str = "") -> list[int | None]:
     wanted = set(ctx.cfg.wazuh.sca_agents)
     results = []
     for agent in ctx.wazuh.agents(status="active"):
-        if wanted and agent["id"] not in wanted and agent.get("name") not in wanted:
+        if agent_id and agent["id"] != agent_id:
+            continue
+        if not agent_id and wanted and agent["id"] not in wanted and agent.get("name") not in wanted:
             continue
         policies = ctx.wazuh.sca_policies(agent["id"])
         if not policies:
@@ -274,7 +285,7 @@ def document_sca(ctx: Context) -> list[int | None]:
             path_vars={"name": agent.get("name", agent["id"])},
             intro=f"SCA-Ergebnisse des Wazuh-Agents `{agent.get('name')}` (ID {agent['id']}). Stand laut "
                   f"letztem Scan; automatisch aktualisiert.",
-            lookup_name=None, source=f"wazuh:sca:{agent['id']}",
+            lookup_name=None, source=f"wazuh:sca:{agent['id']}", stable_id=f"wazuh:sca:{agent['id']}",
         )))
     return results
 

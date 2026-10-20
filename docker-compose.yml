@@ -49,13 +49,13 @@ services:
     environment:
       OLLAMA_NO_CLOUD: "1"          # Cloud-Modelle und Websuche von Ollama abschalten
       OLLAMA_NUM_PARALLEL: "1"      # ein Request gleichzeitig (CPU)
-      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_MAX_LOADED_MODELS: "2" # Sprachmodell + Embedding-Modell bleiben beide geladen
       OLLAMA_KEEP_ALIVE: "10m"
       OLLAMA_CONTEXT_LENGTH: "8192"
     volumes:
       - ollama-models:/root/.ollama
     networks: [llm]
-    # 16 GB Host: qwen3:8b (Q4) braucht ca. 6-7 GB inkl. 8k-Kontext.
+    # 16 GB Host: qwen3:8b (Q4) braucht ca. 6-7 GB inkl. 8k-Kontext, qwen3-embedding:0.6b ca. 1 GB.
     mem_limit: 11g
     healthcheck:
       test: ["CMD", "ollama", "list"]
@@ -65,14 +65,15 @@ services:
       start_period: 20s
     logging: *logging
 
-  # Einmalig bzw. für Modell-Updates: lädt das Modell mit Internetzugang in das gemeinsame Volume.
+  # Einmalig bzw. für Modell-Updates: lädt die Modelle mit Internetzugang in das gemeinsame Volume.
   ollama-pull:
     image: ollama/ollama:0.34.4
     profiles: [setup]
     environment:
       OLLAMA_NO_CLOUD: "1"
       LLM_MODEL: ${LLM_MODEL:-qwen3:8b}
-    entrypoint: ["/bin/sh", "-c", "ollama serve >/tmp/serve.log 2>&1 & sleep 5 && ollama pull \"$$LLM_MODEL\""]
+      EMBED_MODEL: ${EMBED_MODEL:-qwen3-embedding:0.6b}
+    entrypoint: ["/bin/sh", "-c", "ollama serve >/tmp/serve.log 2>&1 & sleep 5 && ollama pull \"$$LLM_MODEL\" && ollama pull \"$$EMBED_MODEL\""]
     volumes:
       - ollama-models:/root/.ollama
     networks: [lan]

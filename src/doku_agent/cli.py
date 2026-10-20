@@ -134,6 +134,46 @@ def cmd_check(args) -> int:
     return 0 if ok_all else 1
 
 
+def cmd_ask(args) -> int:
+    from doku_agent import semantic
+
+    ctx = _ctx(args)
+    text, sources = semantic.answer(ctx, args.question)
+    print(text)
+    if sources:
+        cited = any(s["cited"] for s in sources)
+        print("\nQuellen:" if cited else "\nGefundene Abschnitte (das Modell hat keinen davon als Beleg genannt):")
+        for s in sources:
+            print(f"  [{s['n']}] {s['title']}{' › ' + s['heading'] if s['heading'] else ''} – {s['url']}")
+    return 0
+
+
+def cmd_lint(args) -> int:
+    from doku_agent.jobs import run_now
+    from doku_agent.lint import REPORT_KEY
+
+    ctx = _ctx(args)
+    job_id, ok = run_now(ctx, "wiki_lint", {})
+    if not ok:
+        print(ctx.store.get_job(job_id).log)
+        return 1
+    report = ctx.store.kv_get(REPORT_KEY) or {}
+    sections = (("Tote Links", "dead_links", lambda d: f"/{d['path']} -> {d['target']}"),
+                ("Mögliche Dubletten", "duplicates", lambda d: f"/{d['a']} ~ /{d['b']} ({d['reason']})"),
+                ("Ohne Tags", "untagged", lambda d: f"/{d['path']}"),
+                ("Veraltet (Vorschlag erstellt)", "stale", lambda d: f"/{d['path']} ({d['source']}, #{d['proposal']})"),
+                ("Quelle gelöscht", "gone", lambda d: f"/{d['path']} ({d['reason']})"))
+    print(f"{report.get('pages', 0)} Seiten geprüft.")
+    for title, key, fmt in sections:
+        items = report.get(key, [])
+        print(f"\n{title}: {len(items)}")
+        for item in items:
+            print(f"  {fmt(item)}")
+    for err in report.get("errors", []):
+        print(f"Fehler: {err}")
+    return 0
+
+
 def cmd_conventions(args) -> int:
     ctx = _ctx(args)
     conv = ctx.conventions
@@ -183,6 +223,13 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_reject)
 
     sub.add_parser("check", help="Verbindungen zu allen Diensten prüfen").set_defaults(fn=cmd_check)
+
+    sub.add_parser("lint", help="Wiki prüfen: tote Links, Dubletten, ohne Tags, veraltete Seiten").set_defaults(
+        fn=cmd_lint)
+
+    p = sub.add_parser("frage", help="Frage ans Wiki stellen (Antwort mit Quellen, Suchindex nötig)")
+    p.add_argument("question")
+    p.set_defaults(fn=cmd_ask)
 
     p = sub.add_parser("conventions", help="Gelernte Wiki-Konventionen anzeigen")
     p.add_argument("area", nargs="?", help="Bereich (Pfad-Präfix) für Details")

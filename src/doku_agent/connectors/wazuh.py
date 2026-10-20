@@ -11,7 +11,9 @@ from doku_agent.egress import EgressGuard
 
 
 class WazuhError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class WazuhClient:
@@ -47,7 +49,7 @@ class WazuhClient:
         except httpx.HTTPError as exc:
             raise WazuhError(f"Wazuh-API nicht erreichbar: {exc}") from exc
         if resp.status_code != 200:
-            raise WazuhError(f"Wazuh GET {path}: HTTP {resp.status_code} {resp.text[:300]}")
+            raise WazuhError(f"Wazuh GET {path}: HTTP {resp.status_code} {resp.text[:300]}", resp.status_code)
         return resp.text if raw else resp.json()
 
     def items(self, path: str, params: dict | None = None) -> list[dict]:

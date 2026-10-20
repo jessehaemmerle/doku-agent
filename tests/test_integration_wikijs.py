@@ -77,3 +77,49 @@ def test_create_extend_and_preserve_settings(real_ctx):
         time.sleep(1)
     assert "offline" in html
     assert "doku-agent" not in html  # Wiki.js entfernt HTML-Kommentare beim Rendern
+
+
+def _create(wiki, path, title, content, tags=("it",)):
+    return wiki.create_page(path, title, content, "Integrationstest", list(tags))
+
+
+def test_lint_finds_dead_links_untagged_and_duplicates(real_ctx):
+    from doku_agent import lint
+
+    run = uuid.uuid4().hex[:6]
+    base = f"doku-agent-test/lint-{run}"
+    wiki = real_ctx.wiki
+    _create(wiki, f"{base}/ziel", "Ziel", "Da.")
+    _create(wiki, f"{base}/quelle", "Quelle", f"[ok](/{base}/ziel), [kaputt](/{base}/fehlt), "
+                                              f"[relativ](ziel), [extern](https://example.com)")
+    _create(wiki, f"{base}/ohne-tags", f"Dublette {run}", "Text", tags=())
+    _create(wiki, f"{base}/zweite", f"Dublette {run}", "Text")
+    real_ctx.cfg.lint.report_page = False
+    for _ in range(10):  # Wiki.js erfasst Links beim Rendern (asynchron)
+        lint.run_lint(real_ctx)
+        report = real_ctx.store.kv_get(lint.REPORT_KEY)
+        dead = [d for d in report["dead_links"] if d["path"].startswith(base)]
+        if dead:
+            break
+        time.sleep(1)
+    targets = sorted(d["target"] for d in dead)
+    # absoluter Link auf fehlende Seite und relativer Link (relativ zur Seite selbst, wie Wiki.js auflöst)
+    assert targets == [f"/en/{base}/fehlt", f"/en/{base}/quelle/ziel"]
+    assert any(d["path"] == f"{base}/ohne-tags" for d in report["untagged"])
+    assert any({d["a"], d["b"]} == {f"{base}/ohne-tags", f"{base}/zweite"} for d in report["duplicates"])
+
+
+def test_semantic_index_against_real_wiki(real_ctx):
+    from doku_agent import semantic
+    from tests.test_semantic import FakeEmbedder
+
+    run = uuid.uuid4().hex[:6]
+    path = f"doku-agent-test/dienste-{run}"
+    _create(real_ctx.wiki, path, "Server-Dienste", f"## Lizenzen\n\nFlexLM-{run} läuft auf srv-lic01.\n\n"
+                                                    "## Drucker\n\nPaperCut auf srv-print02.")
+    real_ctx.__dict__["embedder"] = FakeEmbedder()
+    stats = semantic.index_wiki(real_ctx)
+    assert stats["aktualisiert"] >= 1
+    hits = semantic.search(real_ctx, f"Wo läuft FlexLM-{run}?", k=1)
+    assert hits[0].path == path and hits[0].heading == "Lizenzen"
+    assert semantic.index_wiki(real_ctx)["aktualisiert"] == 0

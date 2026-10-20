@@ -1,4 +1,4 @@
-"""Intune: Compliance-Richtlinien, Konfigurationsprofile, Settings Catalog und Apps dokumentieren."""
+"""Intune: Compliance-Richtlinien, Konfigurationsprofile, Settings Catalog, Apps und Entra-Gruppen dokumentieren."""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ TARGETS = {
     "#microsoft.graph.groupAssignmentTarget": "Gruppe",
     "#microsoft.graph.exclusionGroupAssignmentTarget": "Ausgeschlossen",
 }
+CATEGORY_LABELS = {"compliance": "Compliance-Richtlinie", "konfigurationsprofile": "Konfigurationsprofil",
+                   "settings-catalog": "Settings Catalog", "apps": "App"}
+# Zuweisungen je Ziel für die Übersichtsseite: "group:<ID>" bzw. "all:<Alle Benutzer|Alle Geräte>" -> Einträge
+Usage = dict[str, list[dict]]
 
 
 def odata_type(obj: dict) -> str:
@@ -47,17 +51,49 @@ def flatten(obj, prefix: str = "") -> list[tuple[str, str]]:
     return rows
 
 
+def group_kind(group: dict) -> str:
+    """Art der Mitgliedschaft: dynamisch (Regel) oder zugewiesen; Microsoft-365-Gruppen gekennzeichnet."""
+    if "groupTypes" not in group:
+        return "–"  # ohne Group.Read.All unbekannt
+    kind = "dynamisch" if "DynamicMembership" in (group.get("groupTypes") or []) else "zugewiesen"
+    return kind + (", Microsoft 365" if "Unified" in (group.get("groupTypes") or []) else "")
+
+
+def _filter(target: dict) -> str:
+    filt = target.get("deviceAndAppManagementAssignmentFilterType") or ""
+    return "" if filt in ("", "none") else filt
+
+
 def assignments_table(ctx: Context, assignments: list[dict]) -> str:
     rows = []
     for a in assignments:
         target = a.get("target") or {}
         kind = TARGETS.get(target.get("@odata.type", ""), odata_type(target))
-        group = ctx.intune.group_name(target.get("groupId", "")) if target.get("groupId") else ""
-        filt = target.get("deviceAndAppManagementAssignmentFilterType") or ""
-        rows.append([kind, group, a.get("intent", ""), "" if filt in ("", "none") else filt])
+        group = ctx.intune.group(target["groupId"]) if target.get("groupId") else {}
+        rows.append([kind, group.get("displayName", ""), group_kind(group) if group else "", a.get("intent", ""),
+                     _filter(target)])
     if not rows:
         return "_Nicht zugewiesen._"
-    return markdown.table(["Ziel", "Gruppe", "Absicht", "Filter"], rows)
+    text = markdown.table(["Ziel", "Gruppe", "Mitgliedschaft", "Absicht", "Filter"], rows)
+    if "groups" in ctx.cfg.intune.include and any(r[1] for r in rows):
+        overview = ctx.cfg.wiki.paths.get("intune_groups", "")
+        text += (f"\n\nMitgliederzahlen und alle Zuweisungen je Gruppe: "
+                 f"[Intune: Gruppen und Zuweisungen](/{overview.strip('/')})")
+    return text
+
+
+def record_usage(usage: Usage | None, category: str, name: str, assignments: list[dict]) -> None:
+    if usage is None:
+        return
+    for a in assignments:
+        target = a.get("target") or {}
+        odata = target.get("@odata.type", "")
+        key = f"group:{target['groupId']}" if target.get("groupId") else "all:" + TARGETS.get(odata, odata_type(target))
+        usage.setdefault(key, []).append({
+            "kind": CATEGORY_LABELS.get(category, category), "name": name, "intent": a.get("intent", ""),
+            "effect": "ausgeschlossen" if odata.endswith("exclusionGroupAssignmentTarget") else "einbezogen",
+            "filter": _filter(target),
+        })
 
 
 def settings_catalog_rows(settings: list[dict]) -> list[tuple[str, str]]:
@@ -120,8 +156,10 @@ def _describe(ctx: Context, name: str, kind: str, rows: list[tuple[str, str]]) -
     return cached(ctx, "intune:" + digest(name, kind, rows), ask)
 
 
-def _policy_page(ctx: Context, policy: dict, category: str, rows: list[tuple[str, str]], kind: str) -> int | None:
+def _policy_page(ctx: Context, policy: dict, category: str, rows: list[tuple[str, str]], kind: str,
+                 usage: Usage | None = None) -> int | None:
     name = policy.get("displayName") or policy.get("name") or policy["id"]
+    record_usage(usage, category, name, policy.get("_assignments", []))
     rows = [(k, str(mask_value(k, v))) for k, v in rows]
     description = _describe(ctx, name, kind, rows) if rows else "_Keine Einstellungen gesetzt._"
     if policy.get("description"):
@@ -146,30 +184,102 @@ def _policy_page(ctx: Context, policy: dict, category: str, rows: list[tuple[str
     ))
 
 
+def document_policy(ctx: Context, category: str, policy: dict, usage: Usage | None = None) -> int | None:
+    if category == "settings-catalog":
+        rows = settings_catalog_rows(policy.get("_settings", []))
+        return _policy_page(ctx, policy, category, rows, f"Settings Catalog ({policy.get('technologies', '')})", usage)
+    return _policy_page(ctx, policy, category, flatten(policy), odata_type(policy), usage)
+
+
 def document_intune(ctx: Context) -> list[int | None]:
     include = set(ctx.cfg.intune.include)
     intune = ctx.intune
+    usage: Usage = {}
     results = []
     if "compliance" in include:
         for pol in intune.compliance_policies():
-            results.append(_policy_page(ctx, pol, "compliance", flatten(pol), odata_type(pol)))
+            results.append(document_policy(ctx, "compliance", pol, usage))
     if "configurations" in include:
         for pol in intune.device_configurations():
-            results.append(_policy_page(ctx, pol, "konfigurationsprofile", flatten(pol), odata_type(pol)))
+            results.append(document_policy(ctx, "konfigurationsprofile", pol, usage))
     if "settings_catalog" in include:
         for pol in intune.settings_catalog_policies():
-            rows = settings_catalog_rows(pol.get("_settings", []))
-            kind = f"Settings Catalog ({pol.get('technologies', '')})"
-            results.append(_policy_page(ctx, pol, "settings-catalog", rows, kind))
+            results.append(document_policy(ctx, "settings-catalog", pol, usage))
     if "apps" in include:
-        results.append(document_apps(ctx))
+        results.append(document_apps(ctx, usage))
+    if "groups" in include:
+        results.append(document_groups(ctx, usage))
     return results
 
 
-def document_apps(ctx: Context) -> int | None:
+def collect_usage(ctx: Context) -> Usage:
+    """Zuweisungen ohne Einstellungen lesen (für die Gruppen-Übersicht allein, z.B. aus dem Wiki-Lint) –
+    aus denselben Kategorien wie der Intune-Lauf, damit beide dieselbe Seite erzeugen."""
+    usage: Usage = {}
+    intune = ctx.intune
+    include = set(ctx.cfg.intune.include)
+    sources = (("compliance", "compliance", intune.compliance_policies),
+               ("configurations", "konfigurationsprofile", intune.device_configurations),
+               ("settings_catalog", "settings-catalog", lambda: intune.settings_catalog_policies(with_settings=False)),
+               ("apps", "apps", intune.mobile_apps))
+    for key, category, fetch in sources:
+        if key not in include:
+            continue
+        for pol in fetch():
+            record_usage(usage, category, pol.get("displayName") or pol.get("name") or pol["id"],
+                         pol.get("_assignments", []))
+    return usage
+
+
+def _count(value: int | None) -> str:
+    return "–" if value is None else str(value)
+
+
+def document_groups(ctx: Context, usage: Usage | None = None) -> int | None:
+    """Übersichtsseite: jede zugewiesene Gruppe mit Art, dynamischer Regel, Mitgliederzahlen und Zuweisungen.
+    Die Zahlen stehen nur hier, damit sich bei neuen Mitgliedern nicht jede Richtlinien-Seite ändert."""
+    usage = collect_usage(ctx) if usage is None else usage
+    intune = ctx.intune
+    entries = []
+    for key, items in usage.items():
+        kind, _, ident = key.partition(":")
+        if kind == "group":
+            entries.append((intune.group(ident), intune.member_counts(ident), items))
+        else:
+            entries.append(({"displayName": ident}, None, items))
+    entries.sort(key=lambda e: (e[1] is not None, (e[0].get("displayName") or "").lower()))
+    rows, sections = [], []
+    for group, counts, items in entries:
+        name = group.get("displayName") or group.get("id", "")
+        rule = group.get("membershipRule") or ""
+        if counts is None:  # "Alle Benutzer" / "Alle Geräte"
+            rows.append([name, "alle", "", "", "", "", len(items)])
+        else:
+            rows.append([name, group_kind(group), f"`{rule}`" if rule else "", _count(counts.get("user")),
+                         _count(counts.get("device")), _count(counts.get("group")), len(items)])
+        lines = sorted(items, key=lambda i: (i["kind"], i["name"].lower()))
+        sections.append(f"### {name}\n\n" + markdown.table(
+            ["Typ", "Richtlinie / App", "Absicht", "Wirkung", "Filter"],
+            [[i["kind"], i["name"], i["intent"], i["effect"], i["filter"]] for i in lines]))
+    table = markdown.table(["Gruppe", "Mitgliedschaft", "Dynamische Regel", "Benutzer", "Geräte", "Untergruppen",
+                            "Zuweisungen"], rows) if rows else "_Keine Zuweisungen._"
+    return propose_page(ctx, PageDraft(
+        doc_type="intune_groups", title="Intune: Gruppen und Zuweisungen",
+        description="Entra-Gruppen mit Mitgliederzahlen und allen Intune-Zuweisungen",
+        blocks=[Block("intune-groups-table", "Gruppen",
+                      "Mitglieder inklusive verschachtelter Gruppen.\n\n" + table),
+                Block("intune-groups-assignments", "Zuweisungen je Gruppe", "\n\n".join(sections) or "_Keine._")],
+        intro="Welche Entra-Gruppen in Intune verwendet werden, wie viele Mitglieder sie haben und was ihnen "
+              "zugewiesen ist. Automatisch über Microsoft Graph (nur lesend) aktualisiert.",
+        source="intune:groups", stable_id="intune:groups",
+    ))
+
+
+def document_apps(ctx: Context, usage: Usage | None = None) -> int | None:
     apps = ctx.intune.mobile_apps()
     rows = []
     for app in sorted(apps, key=lambda a: (a.get("displayName") or "").lower()):
+        record_usage(usage, "apps", app.get("displayName") or app["id"], app.get("_assignments", []))
         targets = []
         for a in app.get("_assignments", []):
             target = a.get("target") or {}
@@ -183,5 +293,5 @@ def document_apps(ctx: Context) -> int | None:
         blocks=[Block("intune-apps", "Apps", markdown.table(["App", "Typ", "Herausgeber", "Zuweisungen"], rows)
                       if rows else "_Keine Apps._")],
         intro="Übersicht aller in Intune verwalteten Apps mit ihren Zuweisungen (automatisch aktualisiert).",
-        source="intune:apps",
+        source="intune:apps", stable_id="intune:apps",
     ))

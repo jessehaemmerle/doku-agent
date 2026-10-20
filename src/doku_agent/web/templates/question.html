@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block head %}{% if q.status in ('queued', 'running') %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block title %}Frage #{{ q.id }}{% endblock %}
+{% block content %}
+<h1>{{ q.question }}</h1>
+<p class="lede">Frage #{{ q.id }} <span class="status {{ q.status }}">{{ status_labels.get(q.status, q.status) }}</span>
+  {% if q.status in ('queued', 'running') %}Die Antwort wird gesucht – die Seite aktualisiert sich alle 3 Sekunden.{% endif %}</p>
+{% if q.answer %}
+<div class="sheet answer">{% for para in q.answer.split('\n\n') %}<p>{{ para }}</p>{% endfor %}</div>
+{% endif %}
+{% if q.sources %}
+<h2>Quellen</h2>
+<div class="list">
+  {% for s in q.sources %}
+  <a href="{{ s.url }}" rel="noopener">
+    <span class="id">[{{ s.n }}]</span>
+    <span class="title">{{ s.title }}<span class="sub">/{{ s.path }}{% if s.heading %} › {{ s.heading }}{% endif %}</span></span>
+    <span></span>
+  </a>
+  {% endfor %}
+</div>
+{% if not q.sources[0].cited %}<p class="muted">Das Modell hat keine Quelle ausdrücklich genannt – aufgeführt sind die gefundenen Abschnitte.</p>{% endif %}
+{% endif %}
+<p><a href="/fragen">Neue Frage stellen</a></p>
+{% endblock %}

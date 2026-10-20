@@ -90,11 +90,11 @@ class WikiClient:
             raise WikiError(f"{action} fehlgeschlagen: {status.get('message') or status.get('slug') or 'unbekannt'}")
         return result
 
-    def list_pages(self) -> list[PageInfo]:
+    def list_pages(self, all_locales: bool = False) -> list[PageInfo]:
         data = self._gql(
             "query($locale: String) { pages { list(limit: 100000, orderBy: PATH, locale: $locale) "
             "{ id path locale title description tags updatedAt } } }",
-            {"locale": self.cfg.locale},
+            {"locale": None if all_locales else self.cfg.locale},
         )
         return [
             PageInfo(id=p["id"], path=p["path"], title=p.get("title") or "", description=p.get("description") or "",
@@ -133,6 +133,13 @@ class WikiClient:
             return None
         page = data["pages"]["singleByPath"]
         return self._page(page) if page else None
+
+    def links(self) -> list[dict]:
+        """Interne Links aller Seiten der Sprache, wie Wiki.js sie beim Rendern erfasst:
+        [{id, path: "de/pfad", title, links: ["de/ziel", ...]}] – auch Links auf nicht existierende Seiten."""
+        data = self._gql("query($locale: String!) { pages { links(locale: $locale) { id path title links } } }",
+                         {"locale": self.cfg.locale})
+        return [item for item in data["pages"]["links"] or [] if item]
 
     def search(self, query: str) -> list[PageInfo]:
         data = self._gql(

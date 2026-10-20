@@ -12,8 +12,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import date
 
-from doku_agent import markdown
-from doku_agent.config import NetboxConfig
+from doku_agent import markdown, netbox_fields
+from doku_agent.config import NetboxConfig, NetboxCustomFields
 from doku_agent.connectors.netbox import NetboxClient
 from doku_agent.context import Context
 from doku_agent.conventions import slugify
@@ -167,7 +167,8 @@ def wazuh_assets(ctx: Context) -> list[Asset]:
             primary_ip=agent.get("ip") if usable_ip(agent.get("ip") or "") else "",
             interfaces=ifaces,
             sources={"wazuh": {"agent_id": aid, "agent_name": agent.get("name"), "status": agent.get("status"),
-                               "version": agent.get("version"), "groups": agent.get("group") or []}},
+                               "version": agent.get("version"), "groups": agent.get("group") or [],
+                               "last_seen": agent.get("lastKeepAlive")}},
         ))
     return assets
 
@@ -231,18 +232,28 @@ def detect_virtual(asset: Asset, cfg: NetboxConfig) -> bool:
 # --- Abgleich mit Netbox ---------------------------------------------------
 
 class NetboxIndex:
-    """Alle Geräte und VMs aus Netbox, indiziert nach Seriennummer, Name und MAC."""
+    """Alle Geräte und VMs aus Netbox, indiziert nach Wazuh-/Intune-ID (Custom Fields),
+    Seriennummer, Name und MAC."""
 
-    def __init__(self, nb: NetboxClient):
+    def __init__(self, nb: NetboxClient, cf: NetboxCustomFields | None = None):
         self.objects: dict[tuple[str, int], dict] = {}
         self.serials: dict[str, tuple[str, int]] = {}
         self.names: dict[str, tuple[str, int]] = {}
         self.macs: dict[str, tuple[str, int]] = {}
         self.orphan_macs: set[str] = set()  # MAC-Objekte ohne Gerät/VM
+        self.fields = netbox_fields.status(nb, cf) if cf else netbox_fields.FieldStatus()
+        self.cf = cf
+        self.wazuh_ids: dict[str, tuple[str, int]] = {}
+        self.intune_ids: dict[str, tuple[str, int]] = {}
         for endpoint in ("dcim/devices", "virtualization/virtual-machines"):
             for obj in nb.list(endpoint):
                 key = (endpoint, obj["id"])
                 self.objects[key] = obj
+                values = obj.get("custom_fields") or {}
+                if cf and values.get(cf.wazuh_agent_id):
+                    self.wazuh_ids[str(values[cf.wazuh_agent_id])] = key
+                if cf and values.get(cf.intune_device_id):
+                    self.intune_ids[str(values[cf.intune_device_id])] = key
                 if norm_serial(obj.get("serial")):
                     self.serials[obj["serial"].strip().upper()] = key
                 if obj.get("name"):
@@ -260,7 +271,13 @@ class NetboxIndex:
                     self.orphan_macs.add(norm_mac(mac.get("mac_address")))
 
     def find(self, asset: Asset) -> tuple[str, int, str] | None:
-        """(Endpunkt, ID, Trefferart) – Trefferart: serial, name oder mac."""
+        """(Endpunkt, ID, Trefferart) – Trefferart: wazuh_id, intune_id, serial, name oder mac."""
+        agent_id = str((asset.sources.get("wazuh") or {}).get("agent_id") or "")
+        if agent_id in self.wazuh_ids:
+            return (*self.wazuh_ids[agent_id], "wazuh_id")
+        device_id = str((asset.sources.get("intune") or {}).get("id") or "")
+        if device_id in self.intune_ids:
+            return (*self.intune_ids[device_id], "intune_id")
         if asset.serial and asset.serial.upper() in self.serials:
             return (*self.serials[asset.serial.upper()], "serial")
         if asset.name.lower() in self.names:
@@ -276,7 +293,8 @@ class NetboxIndex:
             return None
         endpoint, oid, how = found
         name = self.objects.get((endpoint, oid), {}).get("name") or f"#{oid}"
-        return {"serial": "Seriennummer", "name": "Hostname", "mac": "MAC"}[how] + f" → {name}"
+        return {"wazuh_id": "Wazuh-Agent-ID", "intune_id": "Intune-Geräte-ID", "serial": "Seriennummer",
+                "name": "Hostname", "mac": "MAC"}[how] + f" → {name}"
 
     def name_taken(self, name: str, own: tuple[str, int]) -> bool:
         key = self.names.get(name.lower()) or self.names.get(short_name(name).lower())
@@ -293,7 +311,9 @@ def _role_for(asset: Asset, cfg: NetboxConfig) -> str:
     return cfg.roles[-1].role if cfg.roles else "server"
 
 
-def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int) -> tuple[list[dict], list[str]]:
+def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int,
+               custom_fields: dict[str, dict] | None = None) -> tuple[list[dict], list[str]]:
+    """custom_fields: Werte je Endpunkt (Gerät/VM), soweit die Felder in Netbox existieren."""
     steps: list[dict] = []
     hints: list[str] = []
     vm = detect_virtual(asset, cfg)
@@ -318,6 +338,11 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int) 
         common["serial"] = asset.serial
     if asset.os_name:
         common["platform"] = "$platform"
+
+    if custom_fields:
+        endpoint = "virtualization/virtual-machines" if vm else "dcim/devices"
+        if custom_fields.get(endpoint):
+            common["custom_fields"] = dict(custom_fields[endpoint])
 
     if vm:
         data = {**common}
@@ -407,6 +432,28 @@ def _ethernet_mac(ctx: Context, device_id: str) -> str:
     return mac
 
 
+def update_last_seen(ctx: Context, asset: Asset, found: tuple[str, int, str], index: NetboxIndex) -> bool:
+    """'Zuletzt gesehen' direkt setzen – bewusst ohne Freigabe (ändert sich täglich), nur vorwärts."""
+    from doku_agent.netbox_sync import doubtful_match
+
+    endpoint, oid, how = found
+    name = ctx.cfg.netbox.custom_fields.last_seen
+    if name not in index.fields.available.get(endpoint, set()):
+        return False
+    if doubtful_match(asset, index.objects[(endpoint, oid)], how):
+        return False
+    seen = netbox_fields.last_seen(asset.sources, ctx.cfg.general.timezone)
+    current = (index.objects[(endpoint, oid)].get("custom_fields") or {}).get(name)
+    if not seen or (current and str(current) >= seen):
+        return False
+    try:
+        ctx.netbox.update(endpoint, oid, {"custom_fields": {name: seen}})
+    except Exception as exc:  # einzelne Maschine darf den Lauf nicht abbrechen
+        ctx.log.warning("%s: '%s' nicht gesetzt (%s)", asset.name, name, exc)
+        return False
+    return True
+
+
 def run_discovery(ctx: Context) -> dict:
     cfg = ctx.cfg
     if not cfg.netbox.site:
@@ -428,8 +475,16 @@ def run_discovery(ctx: Context) -> dict:
     assets = merge_assets(raw)
     ctx.log.info("%s Maschinen nach Zusammenführung", len(assets))
 
-    index = NetboxIndex(nb)
-    stats = {"gefunden": len(assets), "bekannt": 0, "vorgeschlagen": 0, "anzupassen": 0, "ignoriert": 0}
+    index = NetboxIndex(nb, cfg.netbox.custom_fields)
+    for hint in index.fields.hints:
+        ctx.log.warning(hint)
+    if index.fields.steps:
+        if netbox_fields.propose_setup(ctx, index.fields):
+            ctx.log.info("Custom Fields fehlen in Netbox – Vorschlag zum Anlegen erstellt")
+    elif index.fields.readable:
+        ctx.store.close_pending(netbox_fields.SETUP_KEY, "Custom Fields sind inzwischen vorhanden.")
+    stats = {"gefunden": len(assets), "bekannt": 0, "vorgeschlagen": 0, "anzupassen": 0, "ignoriert": 0,
+             "zuletzt_gesehen": 0}
     for asset in assets:
         if not asset.name:
             continue
@@ -446,17 +501,21 @@ def run_discovery(ctx: Context) -> dict:
             continue
         if found:
             stats["bekannt"] += 1
-            if cfg.netbox.sync:
+            if cfg.netbox.sync or index.fields.available[found[0]]:
                 from doku_agent.netbox_sync import propose_sync
                 if propose_sync(ctx, asset, found, index):
                     stats["anzupassen"] += 1
+            if update_last_seen(ctx, asset, found, index):
+                stats["zuletzt_gesehen"] += 1
             continue
         dedup = f"netbox:{asset.key}"
         if ctx.store.is_ignored(dedup):
             stats["ignoriert"] += 1
             continue
         vm = detect_virtual(asset, cfg.netbox)
-        steps, hints = build_plan(asset, nb, cfg.netbox, site["id"])
+        values = {ep: netbox_fields.values_for(asset.sources, cfg.netbox.custom_fields, names, cfg.general.timezone)
+                  for ep, names in index.fields.available.items()}
+        steps, hints = build_plan(asset, nb, cfg.netbox, site["id"], values)
         ctx.store.add_proposal(
             "netbox_plan", f"Netbox: {'VM' if vm else 'Gerät'} {asset.name} anlegen",
             {"steps": steps, "hints": hints, "asset": asset.__dict__ | {"interfaces": [i.__dict__ for i in asset.interfaces]},

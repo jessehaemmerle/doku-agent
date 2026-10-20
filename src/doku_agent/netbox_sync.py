@@ -16,10 +16,10 @@ from doku_agent.config import NetboxConfig
 from doku_agent.connectors.netbox import NetboxClient
 from doku_agent.context import Context
 from doku_agent.discovery import Asset, NetboxIndex, detect_virtual, netbox_slug, norm_mac, norm_serial, short_name
-from doku_agent.netbox_plan import comparable
+from doku_agent.netbox_plan import field_value
 
 CATEGORY_LABELS = {"missing": "Fehlende Angabe", "os": "Betriebssystem/Ressourcen",
-                   "network": "Netzwerk", "rename": "Umbenennung"}
+                   "network": "Netzwerk", "rename": "Umbenennung", "ids": "Kennung (Custom Field)"}
 
 
 @dataclass
@@ -70,7 +70,7 @@ class _Builder:
         check = None
         if check_field:
             check = {"endpoint": self.endpoint, "id": self.oid, "field": check_field,
-                     "value": comparable(self.obj.get(check_field))}
+                     "value": field_value(self.obj, check_field)}
         self.changes.append(Change(key, category, label, str(before) if before not in (None, "") else "–",
                                    str(after) if after not in (None, "") else "–", steps, list(requires), check))
         return key
@@ -156,6 +156,22 @@ class _Builder:
             self.hints.append(f"Umbenennung zu '{new}' nicht möglich: Name ist in Netbox schon vergeben.")
             return
         self.add("name", "rename", "Name", current, new, [self.update({"name": new}, "Umbenennen")], check_field="name")
+
+    def ids(self, available: set[str]):
+        """Wazuh-Agent-ID und Intune-Geräte-ID in die Custom Fields schreiben (z.B. nach Neuinstallation
+        des Agents eine neue ID). Feste Zuordnung für alle folgenden Läufe."""
+        cf = self.cfg.custom_fields
+        wanted = [(cf.wazuh_agent_id, "Wazuh-Agent-ID", (self.asset.sources.get("wazuh") or {}).get("agent_id")),
+                  (cf.intune_device_id, "Intune-Geräte-ID", (self.asset.sources.get("intune") or {}).get("id"))]
+        for name, label, value in wanted:
+            if not value or name not in available:
+                continue
+            current = (self.obj.get("custom_fields") or {}).get(name)
+            if str(current or "") == str(value):
+                continue
+            self.add(f"cf:{name}", "ids", label, current, value,
+                     [self.update({"custom_fields": {name: str(value)}}, f"{label} setzen")],
+                     check_field=f"custom_fields.{name}")
 
     # --- Netzwerk -----------------------------------------------------------
 
@@ -283,6 +299,10 @@ def build_changes(asset: Asset, obj: dict, endpoint: str, how: str, nb: NetboxCl
                   index: NetboxIndex) -> tuple[list[Change], list[str]]:
     b = _Builder(asset, obj, endpoint, how, nb, cfg, index)
     enabled = set(cfg.sync)
+    available = index.fields.available.get(endpoint, set())
+    if available:
+        enabled.add("ids")
+        b.ids(available)
     b.serial()
     b.platform()
     b.device_type()
@@ -307,6 +327,12 @@ def sync_summary(name: str, vm: bool, changes: list[Change]) -> str:
                                  [[c.label, CATEGORY_LABELS[c.category], c.before, c.after] for c in changes])
 
 
+def doubtful_match(asset: Asset, obj: dict, how: str) -> bool:
+    """Gleiche MAC, andere Seriennummer: vermutlich geteilte MAC (Dock, USB-Adapter) – nicht dieselbe Maschine."""
+    nb_serial = norm_serial(obj.get("serial"))
+    return how == "mac" and bool(asset.serial and nb_serial) and nb_serial.upper() != asset.serial.upper()
+
+
 def propose_sync(ctx: Context, asset: Asset, found: tuple[str, int, str], index: NetboxIndex) -> bool:
     """Legt einen Anpassungs-Vorschlag an (oder schließt einen erledigten). True, wenn Änderungen anstehen."""
     endpoint, oid, how = found
@@ -314,11 +340,9 @@ def propose_sync(ctx: Context, asset: Asset, found: tuple[str, int, str], index:
     dedup = f"netbox-sync:{endpoint}:{oid}"
     if ctx.store.is_ignored(dedup):
         return False
-    nb_serial = norm_serial(obj.get("serial"))
-    if how == "mac" and asset.serial and nb_serial and nb_serial.upper() != asset.serial.upper():
-        # Gleiche MAC, andere Seriennummer: vermutlich geteilte MAC (Dock, USB-Adapter) – keine Änderungen.
+    if doubtful_match(asset, obj, how):
         ctx.log.warning("%s: MAC-Treffer auf %s, aber Seriennummer abweichend (%s/%s) – kein Abgleich",
-                        asset.name, obj.get("name"), asset.serial, nb_serial)
+                        asset.name, obj.get("name"), asset.serial, norm_serial(obj.get("serial")))
         return False
     changes, hints = build_changes(asset, obj, endpoint, how, ctx.netbox, ctx.cfg.netbox, index)
     if how == "mac":

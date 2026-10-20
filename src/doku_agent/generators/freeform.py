@@ -67,9 +67,29 @@ def gather_material(ctx: Context, instruction: str, files: list[Path]) -> tuple[
     return "\n\n".join(parts), hints
 
 
+def _candidates(ctx: Context, instruction: str, material: str) -> list:
+    """Möglicherweise passende Seiten: zuerst semantisch (Embeddings), dann nach Wortüberschneidung."""
+    conv = ctx.conventions
+    found = conv.similar(f"{instruction} {material[:2000]}", limit=8)
+    try:
+        from doku_agent import semantic
+        if semantic.is_ready(ctx):
+            by_id = {p.id: p for p in conv.pages}
+            hits = semantic.similar_pages(ctx, f"{instruction}\n{material[:2000]}", limit=5)
+            found = [by_id[pid] for pid, _ in hits if pid in by_id] + found
+    except Exception as exc:  # Suche ist eine Hilfe, kein Muss
+        ctx.log.warning("Semantische Suche nicht verfügbar: %s", exc)
+    unique, seen = [], set()
+    for page in found:
+        if page.id not in seen:
+            seen.add(page.id)
+            unique.append(page)
+    return unique[:8]
+
+
 def _decide(ctx: Context, instruction: str, material: str) -> dict:
     conv = ctx.conventions
-    candidates = conv.similar(f"{instruction} {material[:2000]}", limit=8)
+    candidates = _candidates(ctx, instruction, material)
     cand_text = "\n".join(f"- id={p.id} /{p.path} – {p.title}: {p.description}" for p in candidates) or "(keine)"
     areas = "\n".join(f"- {prefix} ({n} Seiten, z.B. {', '.join(t for t in titles if t)})"
                       for prefix, n, titles in conv.areas()[:40]) or "(Wiki ist leer)"

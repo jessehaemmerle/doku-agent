@@ -2,7 +2,7 @@
 
 Benötigte Anwendungsberechtigungen (alle *.Read.All):
   DeviceManagementManagedDevices.Read.All, DeviceManagementConfiguration.Read.All,
-  DeviceManagementApps.Read.All, optional Group.Read.All (Gruppennamen in Zuweisungen).
+  DeviceManagementApps.Read.All, optional Group.Read.All (Gruppennamen, Art und Mitgliederzahlen).
 Es werden ausschließlich GET-Anfragen an Graph gestellt; Inhalte gehen nie an ein LLM außerhalb.
 """
 
@@ -22,7 +22,19 @@ DEVICE_FIELDS = ("id,deviceName,serialNumber,manufacturer,model,operatingSystem,
 
 
 class IntuneError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# Pfade der Richtlinienarten (Kategorie wie in den Wiki-Pfaden)
+POLICY_PATHS = {
+    "compliance": "/v1.0/deviceManagement/deviceCompliancePolicies",
+    "konfigurationsprofile": "/v1.0/deviceManagement/deviceConfigurations",
+    "settings-catalog": "/beta/deviceManagement/configurationPolicies",  # nur in /beta
+}
+GROUP_FIELDS = "id,displayName,description,groupTypes,membershipRule,securityEnabled,mailEnabled"
+GROUP_CACHE_SECONDS = 3600  # Gruppen werden in einem Lauf oft mehrfach gebraucht, ändern sich aber nachts
 
 
 class IntuneClient:
@@ -32,7 +44,7 @@ class IntuneClient:
         self.login = guard.client("https://login.microsoftonline.com", transport=transport, timeout=60)
         self._token: str | None = None
         self._expires = 0.0
-        self._group_names: dict[str, str] = {}
+        self._groups: dict[str, tuple[float, dict]] = {}
 
     def _auth(self) -> str:
         if self._token and time.monotonic() < self._expires - 120:
@@ -49,18 +61,23 @@ class IntuneClient:
         self._expires = time.monotonic() + float(data.get("expires_in", 3600))
         return self._token
 
-    def _get(self, url: str, params: dict | None = None, retries: int = 3) -> dict:
+    def _request(self, url: str, params: dict | None = None, headers: dict | None = None,
+                 retries: int = 3) -> httpx.Response:
         try:
-            resp = self.http.get(url, params=params, headers={"Authorization": f"Bearer {self._auth()}"})
+            resp = self.http.get(url, params=params,
+                                 headers={"Authorization": f"Bearer {self._auth()}", **(headers or {})})
         except httpx.HTTPError as exc:
             raise IntuneError(f"Graph nicht erreichbar: {exc}") from exc
         if resp.status_code == 429 and retries > 0:  # Drosselung durch Graph
             retry_after = resp.headers.get("Retry-After", "10")
             time.sleep(min(int(retry_after) if retry_after.isdigit() else 10, 60))
-            return self._get(url, params, retries - 1)
+            return self._request(url, params, headers, retries - 1)
         if resp.status_code != 200:
-            raise IntuneError(f"Graph GET {url}: HTTP {resp.status_code} {resp.text[:300]}")
-        return resp.json()
+            raise IntuneError(f"Graph GET {url}: HTTP {resp.status_code} {resp.text[:300]}", resp.status_code)
+        return resp
+
+    def _get(self, url: str, params: dict | None = None) -> dict:
+        return self._request(url, params).json()
 
     def _all(self, path: str, params: dict | None = None) -> list[dict]:
         out, url, query = [], path, params
@@ -90,13 +107,29 @@ class IntuneClient:
     def device_configurations(self) -> list[dict]:
         return self._with_assignments("/v1.0/deviceManagement/deviceConfigurations")
 
-    def settings_catalog_policies(self) -> list[dict]:
+    def settings_catalog_policies(self, with_settings: bool = True) -> list[dict]:
         # Settings Catalog gibt es nur in /beta.
         policies = self._with_assignments("/beta/deviceManagement/configurationPolicies")
-        for pol in policies:
-            pol["_settings"] = self._all(f"/beta/deviceManagement/configurationPolicies/{pol['id']}/settings",
-                                         {"$expand": "settingDefinitions"})
+        for pol in policies if with_settings else []:
+            pol["_settings"] = self._settings(pol["id"])
         return policies
+
+    def _settings(self, policy_id: str) -> list[dict]:
+        return self._all(f"/beta/deviceManagement/configurationPolicies/{policy_id}/settings",
+                         {"$expand": "settingDefinitions"})
+
+    def policy(self, category: str, policy_id: str) -> dict:
+        """Eine einzelne Richtlinie samt Zuweisungen (und Einstellungen beim Settings Catalog).
+        Gelöschte Richtlinien liefern IntuneError mit status 404."""
+        path = POLICY_PATHS[category]
+        pol = self._get(f"{path}/{policy_id}")
+        try:
+            pol["_assignments"] = self._all(f"{path}/{policy_id}/assignments")
+        except IntuneError:
+            pol["_assignments"] = []
+        if category == "settings-catalog":
+            pol["_settings"] = self._settings(policy_id)
+        return pol
 
     def mobile_apps(self) -> list[dict]:
         return self._with_assignments("/v1.0/deviceAppManagement/mobileApps")
@@ -110,13 +143,34 @@ class IntuneClient:
                 item["_assignments"] = []
         return items
 
-    def group_name(self, group_id: str) -> str:
+    # --- Entra-Gruppen (braucht Group.Read.All) ------------------------------
+
+    def group(self, group_id: str) -> dict:
+        """Gruppe mit Name, Art und dynamischer Regel; ohne Berechtigung nur die ID."""
         if not self.cfg.resolve_group_names or not group_id:
-            return group_id
-        if group_id not in self._group_names:
+            return {"id": group_id, "displayName": group_id}
+        cached = self._groups.get(group_id)
+        if cached is None or time.monotonic() - cached[0] > GROUP_CACHE_SECONDS:
             try:
-                self._group_names[group_id] = self._get(f"/v1.0/groups/{group_id}",
-                                                        {"$select": "displayName"}).get("displayName", group_id)
+                group = self._get(f"/v1.0/groups/{group_id}", {"$select": GROUP_FIELDS})
             except IntuneError:
-                self._group_names[group_id] = group_id
-        return self._group_names[group_id]
+                group = {"id": group_id, "displayName": group_id}
+            cached = (time.monotonic(), group)
+            self._groups[group_id] = cached
+        return cached[1]
+
+    def group_name(self, group_id: str) -> str:
+        return self.group(group_id).get("displayName") or group_id
+
+    def member_counts(self, group_id: str) -> dict[str, int | None]:
+        """Mitglieder inkl. verschachtelter Gruppen, getrennt nach Benutzern, Geräten und Gruppen.
+        None, wenn Graph die Zählung ablehnt (z.B. Untergruppen bei Microsoft-365-Gruppen)."""
+        counts: dict[str, int | None] = {}
+        for kind in ("user", "device", "group"):
+            try:
+                resp = self._request(f"/v1.0/groups/{group_id}/transitiveMembers/microsoft.graph.{kind}/$count",
+                                     headers={"ConsistencyLevel": "eventual"})
+                counts[kind] = int(resp.text.strip())
+            except (IntuneError, ValueError):
+                counts[kind] = None
+        return counts

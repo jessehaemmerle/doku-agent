@@ -3,6 +3,7 @@ import pytest
 
 from doku_agent.config import ConfigError, load_config
 from doku_agent.egress import EgressBlocked, EgressGuard, allowed_hosts
+from doku_agent.jobs import JOBS
 from tests.conftest import make_config
 
 
@@ -28,9 +29,10 @@ def test_example_config_is_valid(monkeypatch):
     for var in ("WIKI_API_KEY", "NETBOX_TOKEN", "WAZUH_USER", "WAZUH_PASSWORD", "INTUNE_TENANT_ID",
                 "INTUNE_CLIENT_ID", "INTUNE_CLIENT_SECRET", "WEB_PASSWORD"):
         monkeypatch.setenv(var, "x")
+    monkeypatch.delenv("FORTIGATE_TOKEN", raising=False)  # FortiGate ist im Beispiel aus – darf nicht stören
     cfg = load_config("config.example.yaml")
-    assert cfg.llm.model == "qwen3:8b"
-    assert {e.job for e in cfg.schedule} <= {"discovery", "wazuh_rules", "wazuh_decoders", "wazuh_config", "wazuh_sca"}
+    assert cfg.llm.model == "qwen3:8b" and cfg.embeddings.model == "qwen3-embedding:0.6b"
+    assert {e.job for e in cfg.schedule} <= set(JOBS)
 
 
 def test_allowlist_contains_only_configured_hosts(tmp_path):

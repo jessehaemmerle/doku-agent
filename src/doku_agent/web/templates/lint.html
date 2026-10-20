@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Wiki-Lint{% endblock %}
+{% block content %}
+<h1>Wiki-Lint</h1>
+<p class="lede">Prüft das Wiki auf tote interne Links, mögliche Dubletten, Seiten ohne Tags und Seiten, deren Quelle (Netbox, Intune, Wazuh, FortiGate) sich geändert hat. Für veraltete Seiten entsteht ein Aktualisierungs-Vorschlag. Externe Links werden nicht aufgerufen.</p>
+<form method="post" action="/jobs">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button class="primary" type="submit" name="name" value="wiki_lint">Jetzt prüfen</button>
+</form>
+
+{% if not report %}
+<p class="muted">Noch kein Bericht vorhanden.</p>
+{% else %}
+<p class="muted">Stand {{ report.at[:16].replace('T', ' ') }} UTC, {{ report.pages }} Seiten geprüft{% if report.current %}, {{ report.current }} vom Agent gepflegte Seiten aktuell{% endif %}.
+  {% if report.report_proposal %}Bericht als Wiki-Seite: <a href="/vorschlaege/{{ report.report_proposal }}">Vorschlag #{{ report.report_proposal }}</a>.{% endif %}</p>
+
+{% macro page(path, title) %}<a href="{{ page_url(path) }}" rel="noopener">{{ title or path }}</a><span class="sub">/{{ path }}</span>{% endmacro %}
+
+<h2>Veraltete Seiten <span class="muted">({{ report.stale|length }})</span></h2>
+<div class="list">
+  {% for d in report.stale %}
+  <div><span class="id">#{{ d.proposal }}</span><span class="title">{{ page(d.path, d.title) }}</span>
+    <a href="/vorschlaege/{{ d.proposal }}">Vorschlag prüfen</a></div>
+  {% else %}<p class="empty">Alle vom Agent gepflegten Seiten sind aktuell.</p>{% endfor %}
+</div>
+
+<h2>Tote Links <span class="muted">({{ report.dead_links|length }})</span></h2>
+<div class="list">
+  {% for d in report.dead_links %}
+  <div><span class="id">–</span><span class="title">{{ page(d.path, d.title) }}</span><code>{{ d.target }}</code></div>
+  {% else %}<p class="empty">Keine toten Links.</p>{% endfor %}
+</div>
+
+<h2>Mögliche Dubletten <span class="muted">({{ report.duplicates|length }})</span></h2>
+<div class="list">
+  {% for d in report.duplicates %}
+  <div><span class="id">–</span><span class="title">{{ page(d.a, d.a_title) }}{{ page(d.b, d.b_title) }}</span><span class="muted">{{ d.reason }}</span></div>
+  {% else %}<p class="empty">Keine Dubletten gefunden.</p>{% endfor %}
+</div>
+
+<h2>Seiten ohne Tags <span class="muted">({{ report.untagged|length }})</span></h2>
+<div class="list">
+  {% for d in report.untagged %}
+  <div><span class="id">–</span><span class="title">{{ page(d.path, d.title) }}</span><span></span></div>
+  {% else %}<p class="empty">Alle Seiten haben Tags.</p>{% endfor %}
+</div>
+
+<h2>Quelle gelöscht <span class="muted">({{ report.gone|length }})</span></h2>
+<div class="list">
+  {% for d in report.gone %}
+  <div><span class="id">–</span><span class="title">{{ page(d.path, d.title) }}</span><span class="muted">{{ d.reason }}</span></div>
+  {% else %}<p class="empty">Keine Seiten ohne Quelle.</p>{% endfor %}
+</div>
+
+{% if report.errors %}
+<h2>Fehler</h2>
+<pre class="log">{{ report.errors|join('\n') }}</pre>
+{% endif %}
+{% endif %}
+{% endblock %}

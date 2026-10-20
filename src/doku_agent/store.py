@@ -1,4 +1,4 @@
-"""SQLite-Ablage für Freigabe-Liste (Vorschläge), Jobs, Ignorierliste und Cache."""
+"""SQLite-Ablage für Freigabe-Liste (Vorschläge), Jobs, Ignorierliste, Cache, Suchindex und Fragen."""
 
 from __future__ import annotations
 
@@ -46,6 +46,30 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS indexed_pages (   -- Stand des semantischen Suchindex je Wiki-Seite
+    page_id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    model TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_id INTEGER NOT NULL,
+    heading TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    vector BLOB NOT NULL               -- float32, normiert
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_id);
+CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL,              -- queued | running | done | failed
+    answer TEXT NOT NULL DEFAULT '',
+    sources TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
 """
 
 # Feste SQL-Fragmente für änderbare Spalten (keine dynamischen Spaltennamen im SQL).
@@ -77,6 +101,17 @@ class Proposal:
     result: str
     created_at: str
     updated_at: str
+
+
+@dataclass
+class Question:
+    id: int
+    question: str
+    status: str
+    answer: str
+    sources: list[dict]
+    created_at: str
+    finished_at: str | None
 
 
 @dataclass
@@ -260,3 +295,76 @@ class Store:
     def kv_set(self, key: str, value) -> None:
         with self._conn() as db:
             db.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+
+    def kv_items(self, prefix: str) -> dict:
+        """Alle Einträge, deren Schlüssel mit prefix beginnt (z.B. 'page-for:')."""
+        with self._conn() as db:
+            rows = db.execute("SELECT key, value FROM kv WHERE substr(key, 1, ?) = ?", (len(prefix), prefix)).fetchall()
+        return {r["key"]: json.loads(r["value"]) for r in rows}
+
+    def kv_delete(self, key: str) -> None:
+        with self._conn() as db:
+            db.execute("DELETE FROM kv WHERE key=?", (key,))
+
+    # --- Semantischer Suchindex -------------------------------------------
+
+    def indexed_pages(self) -> dict[int, dict]:
+        with self._conn() as db:
+            return {r["page_id"]: dict(r) for r in db.execute("SELECT * FROM indexed_pages").fetchall()}
+
+    def replace_page_chunks(self, page_id: int, path: str, title: str, updated_at: str, model: str,
+                            chunks: list[tuple[str, str, bytes]]) -> None:
+        """Abschnitte einer Seite ersetzen (heading, text, vector)."""
+        with self._conn() as db:
+            db.execute("DELETE FROM chunks WHERE page_id=?", (page_id,))
+            db.executemany("INSERT INTO chunks (page_id, heading, text, vector) VALUES (?, ?, ?, ?)",
+                           [(page_id, h, t, v) for h, t, v in chunks])
+            db.execute("INSERT OR REPLACE INTO indexed_pages (page_id, path, title, updated_at, model) "
+                       "VALUES (?, ?, ?, ?, ?)", (page_id, path, title, updated_at, model))
+
+    def delete_page_chunks(self, page_ids: list[int]) -> None:
+        with self._conn() as db:
+            db.executemany("DELETE FROM chunks WHERE page_id=?", [(p,) for p in page_ids])
+            db.executemany("DELETE FROM indexed_pages WHERE page_id=?", [(p,) for p in page_ids])
+
+    def chunks_for_model(self, model: str) -> list[dict]:
+        with self._conn() as db:
+            rows = db.execute(
+                "SELECT c.id, c.page_id, c.heading, c.text, c.vector, i.path, i.title FROM chunks c "
+                "JOIN indexed_pages i ON i.page_id = c.page_id WHERE i.model=? ORDER BY c.id", (model,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- Fragen ans Wiki ----------------------------------------------------
+
+    @staticmethod
+    def _question(row: sqlite3.Row) -> Question:
+        d = dict(row)
+        d["sources"] = json.loads(d["sources"])
+        return Question(**d)
+
+    def add_question(self, question: str) -> int:
+        with self._conn() as db:
+            cur = db.execute("INSERT INTO questions (question, status, created_at) VALUES (?, 'queued', ?)",
+                             (question, now()))
+            return cur.lastrowid
+
+    def set_question(self, qid: int, status: str, answer: str = "", sources: list[dict] | None = None) -> None:
+        finished = now() if status in ("done", "failed") else None
+        with self._conn() as db:
+            db.execute("UPDATE questions SET status=?, answer=?, sources=?, finished_at=? WHERE id=?",
+                       (status, answer, json.dumps(sources or []), finished, qid))
+
+    def get_question(self, qid: int) -> Question | None:
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
+        return self._question(row) if row else None
+
+    def list_questions(self, limit: int = 20) -> list[Question]:
+        with self._conn() as db:
+            rows = db.execute("SELECT * FROM questions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [self._question(r) for r in rows]
+
+    def reset_open_questions(self) -> None:
+        with self._conn() as db:
+            db.execute("UPDATE questions SET status='failed', answer='Abgebrochen durch Neustart.', finished_at=? "
+                       "WHERE status IN ('queued', 'running')", (now(),))

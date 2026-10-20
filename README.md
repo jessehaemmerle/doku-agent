@@ -1,8 +1,10 @@
 # doku-agent
 
 Lokaler KI-Agent, der IT-Dokumentation erzeugt und in **Wiki.js** pflegt – mit Fokus auf
-**Netbox** (Maschinen erkennen und eintragen), **Wazuh** (eigene Regeln, Decoder, Konfiguration, SCA)
-und **Intune** (Richtlinien, Profile, Apps), aber auch für beliebige andere Themen aus Stichpunkten und Dateien.
+**Netbox** (Maschinen erkennen, eintragen und aktuell halten), **Wazuh** (eigene Regeln, Decoder, Konfiguration, SCA),
+**Intune** (Richtlinien, Profile, Apps, Entra-Gruppen) und **FortiGate** (Regelwerk, NAT, Objekte, Netzwerk, VPN),
+aber auch für beliebige andere Themen aus Stichpunkten und Dateien. Dazu kommen **Fragen ans Wiki** mit
+Quellenangabe und ein **Wiki-Lint**, der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet.
 
 - **Komplett lokal:** Das Sprachmodell läuft per [Ollama](https://ollama.com) auf deiner Maschine.
   Der Agent darf nur die konfigurierten Hosts erreichen; alles andere wird vor dem Senden blockiert.
@@ -17,12 +19,13 @@ und **Intune** (Richtlinien, Profile, Apps), aber auch für beliebige andere The
                ┌──────────── Docker Compose ────────────────────────────┐
   Browser ───▶ │  agent (Web-UI, CLI, Worker, Zeitplan)                 │
   localhost    │     │  Netz "llm" (intern, kein Internet)               │
-               │     └──────────▶ ollama (qwen3:8b, CPU)                 │
+               │     └──────────▶ ollama (qwen3:8b + qwen3-embedding)    │
                │     │  Netz "lan"                                        │
                └─────┼────────────────────────────────────────────────────┘
                      ├──▶ Wiki.js 2.x  (GraphQL, lesen + schreiben nach Freigabe)
                      ├──▶ Netbox 4.x   (REST, Discovery + Anlegen nach Freigabe)
                      ├──▶ Wazuh 4.x    (Server-API, nur lesend)
+                     ├──▶ FortiGate    (REST-API, nur lesend, optional)
                      └──▶ Microsoft Graph (Intune, nur lesend, optional)
 ```
 
@@ -31,13 +34,18 @@ und **Intune** (Richtlinien, Profile, Apps), aber auch für beliebige andere The
 | Bereich | Was passiert | Ergebnis |
 |---|---|---|
 | **Netbox-Discovery** | Liest Geräte aus Intune und Wazuh-Agents (Seriennummer, Hostname, MACs, IPs, OS), führt sie zusammen und gleicht mit Netbox ab | Pro fehlender Maschine ein **Netbox-Plan** (Hersteller, Gerätetyp, Plattform, Gerät/VM, Interfaces, MACs, IPs, primäre IP). Nach Freigabe wird angelegt und automatisch ein **Steckbrief** im Wiki vorgeschlagen |
-| **Netbox-Abgleich** | Vergleicht bereits eingetragene Maschinen mit Intune und Wazuh | Pro Maschine ein Vorschlag mit **Vorher/Nachher je Änderung**, jede einzeln per Häkchen übernehmbar: fehlende Angaben, OS/Plattform und VM-Ressourcen, Netzwerk (IPs, MACs, primäre IP), Umbenennungen |
+| **Netbox-Abgleich** | Vergleicht bereits eingetragene Maschinen mit Intune und Wazuh | Pro Maschine ein Vorschlag mit **Vorher/Nachher je Änderung**, jede einzeln per Häkchen übernehmbar: fehlende Angaben, OS/Plattform und VM-Ressourcen, Netzwerk (IPs, MACs, primäre IP), Umbenennungen, Wazuh-/Intune-ID |
+| **Netbox-Custom-Fields** | `wazuh_agent_id`, `intune_device_id`, `last_seen` | Maschinen werden zuerst über die IDs wiedererkannt; „zuletzt gesehen“ wird täglich gepflegt. Fehlende Felder schlägt der Agent einmalig zum Anlegen vor |
 | **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces und IPs | Wiki-Seite pro Maschine; der Netbox-Teil wird bei Änderungen aktualisiert |
 | **Wazuh-Regeln/Decoder** | Liest `etc/rules` bzw. `etc/decoders`, parst das XML | Seite pro Datei: Übersicht, Regel-Tabelle (Level, Bedingungen, MITRE) und Erläuterung jeder Regel durch das LLM |
 | **Wazuh-Konfiguration** | `ossec.conf` des Managers und `agent.conf` jeder Gruppe | Zusammenfassung und Einstellungen je Abschnitt; Passwörter, API-Keys und Webhooks werden maskiert |
 | **Wazuh-SCA** | SCA-Ergebnisse aller (oder ausgewählter) Agents | Score je Richtlinie und fehlgeschlagene Prüfungen mit Behebung |
-| **Intune** | Compliance-Richtlinien, Konfigurationsprofile, Settings Catalog, Apps | Seite je Richtlinie mit Beschreibung, Zuweisungen (Gruppennamen) und allen Einstellungen; App-Übersicht |
-| **Freie Doku** | Stichpunkte und Dateien (TXT, Config, Log, CSV/JSON/XML/YAML, PDF, DOCX) | Der Agent sucht eine passende bestehende Seite und ergänzt sie, oder legt eine neue im passenden Bereich an |
+| **Intune** | Compliance-Richtlinien, Konfigurationsprofile, Settings Catalog, Apps | Seite je Richtlinie mit Beschreibung, Zuweisungen (Gruppenname und Art: dynamisch/zugewiesen) und allen Einstellungen; App-Übersicht |
+| **Entra-Gruppen** | Alle Gruppen, die in Intune-Zuweisungen vorkommen | Übersichtsseite mit Art, dynamischer Regel, Mitgliederzahlen (Benutzer, Geräte, Untergruppen) und allen Zuweisungen je Gruppe |
+| **FortiGate** | Policies, Adressen/Dienste, VIPs/IP-Pools, Interfaces/Zonen/Routen, IPsec | Je Firewall (und VDOM) fünf Seiten: Regeln mit Erklärung jeder Regel durch das LLM, NAT, Objekte mit Verwendung, Netzwerk, VPN. PSKs und Passwörter werden nie übernommen |
+| **Freie Doku** | Stichpunkte und Dateien (TXT, Config, Log, CSV/JSON/XML/YAML, PDF, DOCX) | Der Agent sucht eine passende bestehende Seite (auch inhaltlich über den Suchindex) und ergänzt sie, oder legt eine neue im passenden Bereich an |
+| **Fragen ans Wiki** | Frage in eigenen Worten („Wo läuft der Lizenzserver?“) | Antwort nur aus Wiki-Auszügen, mit nummerierten Quellen und Links; sagt ehrlich, wenn das Wiki die Antwort nicht enthält |
+| **Wiki-Lint** | Ganzes Wiki | Bericht über tote interne Links, mögliche Dubletten, Seiten ohne Tags und veraltete Seiten (Quelle geändert → Aktualisierungs-Vorschlag) |
 
 ## Installation
 
@@ -48,9 +56,10 @@ Netbox und Wazuh.
 git clone <dieses-repo> doku-agent && cd doku-agent
 cp config.example.yaml config.yaml     # URLs, Standort, Zeitplan anpassen
 cp .env.example .env                   # Tokens und Passwörter eintragen
-docker compose --profile setup run --rm ollama-pull   # Modell einmalig laden (ca. 5 GB)
+docker compose --profile setup run --rm ollama-pull   # Modelle einmalig laden (ca. 5,2 + 0,6 GB)
 docker compose up -d
 docker compose exec agent doku-agent check            # Verbindungen prüfen
+docker compose exec agent doku-agent run wiki_index   # Suchindex für Fragen ans Wiki aufbauen
 ```
 
 Danach ist die Oberfläche unter <http://127.0.0.1:8080> erreichbar (Benutzer `admin`, Passwort aus `WEB_PASSWORD`).
@@ -65,16 +74,22 @@ dem **Markdown-Editor**. Seiten im Visual Editor (HTML) werden erkannt und über
 **Netbox** – eigenen Benutzer `doku-agent` anlegen, Token erzeugen (v1 oder v2 `nbt_…`, beides wird unterstützt).
 Rechte: Anzeigen auf DCIM/IPAM/Virtualization, Anlegen/Ändern für Geräte, Gerätetypen, Hersteller, Rollen,
 Plattformen, Interfaces, MAC-Adressen, IP-Adressen und VMs. Löschen wird nur für das Rollback eines
-fehlgeschlagenen Plans benötigt. Alle Änderungen stehen im Netbox-Changelog unter diesem Benutzer.
-In `config.yaml` muss `netbox.site` auf einen existierenden Standort zeigen.
+fehlgeschlagenen Plans benötigt. Für die Custom Fields braucht der Benutzer einmalig *Custom Field anlegen/ändern*
+(oder du legst die drei Felder selbst an, siehe unten). Alle Änderungen stehen im Netbox-Changelog unter diesem
+Benutzer. In `config.yaml` muss `netbox.site` auf einen existierenden Standort zeigen.
 
 **Wazuh** – API-Benutzer mit Leserechten (z.B. Rolle `readonly`) auf dem Manager (Port 55000).
 
 **Intune (optional)** – App-Registrierung in Entra ID mit Client-Secret und den **Anwendungsberechtigungen**
 `DeviceManagementManagedDevices.Read.All`, `DeviceManagementConfiguration.Read.All`,
-`DeviceManagementApps.Read.All` sowie optional `Group.Read.All` (Gruppennamen in Zuweisungen). Admin-Zustimmung
+`DeviceManagementApps.Read.All` sowie optional `Group.Read.All` (Gruppennamen, Art und Mitgliederzahlen). Admin-Zustimmung
 erteilen und `intune.enabled: true` setzen. Der Agent stellt ausschließlich GET-Anfragen. Die Daten werden nur
 gelesen und lokal verarbeitet.
+
+**FortiGate (optional)** – *System › Administratoren › REST-API-Admin* anlegen, mit einem Admin-Profil, das alles
+nur lesen darf, und den Agent-Host als *Trusted Host* eintragen. Das Token als `FORTIGATE_TOKEN` in `.env`, die
+Firewall unter `fortigate.devices` eintragen und `fortigate.enabled: true` setzen. Getestet ist das Schema von
+FortiOS 7.x; ältere Versionen ohne einzelne Tabellen (z.B. zentrale SNAT) werden übersprungen.
 
 Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml` einkommentieren und
 `verify_tls: /config/ca.pem` setzen.
@@ -86,6 +101,8 @@ Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml
   Titel, Pfad, Tags und Inhalt bzw. der Netbox-Plan (JSON) bearbeiten. *Ablehnen + Nicht mehr vorschlagen*
   setzt das Objekt auf die Ignorierliste.
 - *Neuer Auftrag*: Stichpunkte und Dateien hochladen, optional eine Zielseite angeben.
+- *Fragen*: Frage ans Wiki stellen, Antwort mit Quellen.
+- *Wiki-Lint*: letzter Prüfbericht, „Jetzt prüfen“ startet eine neue Prüfung.
 - *Jobs*: Läufe starten und Protokolle ansehen. Jobs laufen nacheinander, damit das Modell die CPU nicht doppelt
   belegt.
 - *Konventionen*: zeigt, was der Agent je Wiki-Bereich gelernt hat.
@@ -96,13 +113,17 @@ Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml
 ```bash
 doku-agent check                         # Verbindungen und Allowlist prüfen
 doku-agent run discovery                 # Netbox-Discovery jetzt ausführen
-doku-agent run wazuh_rules               # weitere: wazuh_decoders, wazuh_config, wazuh_sca, intune, netbox_devices
+doku-agent run wazuh_rules               # weitere: wazuh_decoders, wazuh_config, wazuh_sca, intune, fortigate,
+                                         #          netbox_devices, wiki_index, wiki_lint
+doku-agent run fortigate --param device=fw-zentrale --param sections=policies,nat
 doku-agent run netbox_device --param id=42 --param kind=device
 doku-agent doc "Backup der Fileserver" -f notizen.txt [-t infrastruktur/backup/fileserver]
 doku-agent proposals                     # offene Vorschläge
 doku-agent show 12                       # Vorschlag mit Diff
 doku-agent approve 12 | doku-agent reject 12 --ignore
 doku-agent conventions [bereich]         # gelernte Konventionen
+doku-agent frage "Wo läuft der Lizenzserver?"   # Antwort mit Quellen
+doku-agent lint                          # Wiki prüfen und Bericht ausgeben
 ```
 
 **Zeitplan** – in `config.yaml` unter `schedule` (Uhrzeit in `general.timezone`). Ergebnisse der nächtlichen Läufe
@@ -200,12 +221,79 @@ So bleibt eure Handarbeit geschützt:
 - Nach dem Übernehmen wird der Wiki-Steckbrief aktualisiert. Nach einer Umbenennung folgt die bestehende Seite dem
   neuen Namen (Titel), statt dass eine zweite Seite entsteht.
 
+### Custom Fields: feste Zuordnung und „zuletzt gesehen“
+
+Seriennummer, Hostname und MAC können sich ändern. Deshalb merkt sich der Agent in drei Custom Fields, welche Maschine
+zu welchem Wazuh-Agent und welchem Intune-Gerät gehört:
+
+| Feld | Typ | Pflege |
+|---|---|---|
+| `wazuh_agent_id` | Text | beim Anlegen gesetzt; bei bestehenden Maschinen bzw. nach Neuinstallation des Agents als Änderung „Kennung“ mit Freigabe |
+| `intune_device_id` | Text | wie oben |
+| `last_seen` | Datum | letzter Kontakt laut Wazuh/Intune (Ortszeit); wird **ohne Freigabe** gesetzt und nur vorwärts geändert |
+
+- Die Wiedererkennung prüft zuerst die IDs, dann Seriennummer, Hostname und MAC.
+- Fehlen die Felder, schlägt die Discovery **einmalig** vor, sie anzulegen (für Geräte und VMs, Gruppe „doku-agent“).
+  Wer sie lieber selbst anlegt: Namen, Typen und Objekttypen wie in der Tabelle; `doku-agent check` zeigt, ob alles passt.
+  Die Namen sind unter `netbox.custom_fields` einstellbar, `enabled: false` schaltet die Funktion ab.
+- `last_seen` ist die einzige Ausnahme von „alles mit Freigabe“: Der Wert ändert sich bei jeder aktiven Maschine täglich.
+  Er erscheint deshalb auch nicht im Wiki-Steckbrief (sonst gäbe es jede Nacht neue Vorschläge). Jede Aktualisierung
+  steht wie gewohnt im Netbox-Changelog.
+
+## Firewall-Dokumentation (FortiGate)
+
+Je Firewall und VDOM entstehen fünf Seiten unter `netzwerk/firewall/<name>/`:
+
+| Seite | Inhalt |
+|---|---|
+| `regeln` | Zusammenfassung des Regelwerks, Tabelle aller Policies in Auswertungsreihenfolge (Quelle, Ziel, Dienst mit aufgelösten Objekten, Aktion, NAT, Sicherheitsprofile, Logging) und je Regel eine Erklärung durch das LLM |
+| `nat` | Virtuelle IPs/Portweiterleitungen, IP-Pools, Regeln mit Quell-NAT, zentrale SNAT-Tabelle |
+| `objekte` | Adressen, Adressgruppen, Dienste und Dienstgruppen mit der Spalte „In Regel“ – unbenutzte Objekte fallen sofort auf |
+| `netzwerk` | Interfaces mit VLANs, IPs, Rollen und Verwaltungszugriff, Zonen, statische Routen |
+| `vpn` | IPsec-Tunnel (Gegenstelle, IKE-Version, Verfahren) und Phase-2-Netze; Hinweis auf veraltete Verfahren |
+
+- Erklärungen werden in Gruppen zu sechs Regeln erzeugt und nach Inhalt zwischengespeichert. Der erste Lauf bei einigen
+  hundert Regeln dauert auf CPU entsprechend (nachts unkritisch), danach werden nur geänderte Regeln neu erklärt.
+- Geheimnisse (PSKs, Passwörter, verschlüsselte `ENC …`-Werte) werden entfernt, bevor Daten das LLM oder das Wiki
+  erreichen.
+- Es werden ausschließlich GET-Anfragen gestellt.
+
+## Fragen ans Wiki
+
+Der Agent zerlegt jede Wiki-Seite an ihren Überschriften, berechnet mit dem lokalen Embedding-Modell
+(`qwen3-embedding:0.6b`, mehrsprachig) Vektoren und speichert sie in der SQLite-Datenbank. Bei einer Frage sucht er die
+passendsten Abschnitte und lässt das Sprachmodell **nur auf deren Grundlage** antworten, mit Nummern als Belegen.
+
+- Der Index wird inkrementell aktualisiert: nachts (`wiki_index`) und nach jeder Freigabe für die geänderte Seite.
+- Dieselbe Suche hilft bei freien Aufträgen, die richtige bestehende Seite zum Ergänzen zu finden – auch wenn Titel und
+  Pfad andere Wörter verwenden als der Auftrag.
+- Steht die Antwort nicht im Wiki, sagt das Modell das. Getestet: „Wo läuft der Lizenzserver?“ → richtige Antwort mit
+  Quellen in knapp einer Minute auf 4 CPU-Kernen.
+- Der Agent liest alle Seiten, die sein Wiki.js-API-Schlüssel sehen darf. Wer Fragen stellen kann, sieht also Auszüge
+  aus all diesen Seiten – die Oberfläche hat nur einen Benutzer.
+
+## Wiki-Lint
+
+`wiki_lint` (Standard: sonntags) prüft das ganze Wiki:
+
+| Prüfung | Wie |
+|---|---|
+| Tote Links | Wiki.js erfasst beim Rendern jeden internen Link, auch auf fehlende Seiten. Geprüft wird gegen die Seitenliste aller Sprachen. Relative Links löst Wiki.js relativ zur Seite selbst auf – genauso zeigt sie der Bericht. Externe Links werden nicht aufgerufen. |
+| Mögliche Dubletten | Gleicher Titel oder nahezu gleicher Inhalt (Suchindex, Schwelle `lint.duplicate_threshold`). Vom Agent gepflegte Seiten verschiedener Objekte (z.B. zwei Steckbriefe) gelten nie als Dublette. |
+| Seiten ohne Tags | Seiten ohne ein einziges Tag. |
+| Veraltete Seiten | Jede Seite mit Quellobjekt (Netbox, Intune, Wazuh, FortiGate) wird über ihren Generator neu berechnet. Weicht das Ergebnis ab, entsteht ein normaler Vorschlag mit Diff. |
+| Quelle gelöscht | Gerät, Richtlinie, Regeldatei usw. existiert nicht mehr – wird nur gemeldet, nichts gelöscht. |
+
+Der Bericht steht unter *Wiki-Lint* und zusätzlich als Seite `wartung/wiki-lint` (als Vorschlag, ohne Datum – sie ändert
+sich nur, wenn sich die Befunde ändern).
+
 ## Modell und Leistung (16 GB RAM, nur CPU)
 
 | Modell | RAM | Einsatz |
 |---|---|---|
 | `qwen3:8b` (Standard) | ca. 6–7 GB inkl. 8k-Kontext | gute Texte und zuverlässiges JSON; einige Minuten pro Seite |
 | `qwen3:4b` | ca. 3–4 GB | etwa doppelt so schnell, schwächer bei langen Erklärungen |
+| `qwen3-embedding:0.6b` (Suche) | ca. 1 GB | Suchindex und Fragen; bleibt neben dem Sprachmodell geladen (`OLLAMA_MAX_LOADED_MODELS=2`) |
 
 Modell wechseln: `llm.model` in `config.yaml` und `LLM_MODEL` in `.env` anpassen, dann
 `docker compose --profile setup run --rm ollama-pull` und `docker compose restart agent`.
@@ -215,12 +303,13 @@ nur Erklärungen, Beschreibungen und freie Texte. So bleiben Fakten korrekt, auc
 ## Datenschutz und Sicherheit
 
 - **Egress-Allowlist:** Jeder HTTP-Client des Agents prüft vor dem Senden, ob der Ziel-Host konfiguriert ist (Wiki,
-  Ollama, Netbox, Wazuh, bei Intune `login.microsoftonline.com` und `graph.microsoft.com`). Weiterleitungen werden
+  Ollama, Netbox, Wazuh, FortiGates, bei Intune `login.microsoftonline.com` und `graph.microsoft.com`). Weiterleitungen werden
   nicht verfolgt, Proxy-Variablen werden standardmäßig ignoriert.
 - **Ollama ohne Internet:** Der Ollama-Container hängt nur am internen Netz `llm`. Zusätzlich ist
   `OLLAMA_NO_CLOUD=1` gesetzt (keine Cloud-Modelle, keine Websuche). Nur der einmalige `ollama-pull` hat Internet.
-- **Geheimnisse:** Tokens nur in `.env` (nicht eingecheckt). In Wazuh-Konfigurationen und Intune-Einstellungen
-  werden Passwörter, Keys, Tokens und Webhooks vor dem Prompt und vor dem Wiki maskiert.
+- **Geheimnisse:** Tokens nur in `.env` (nicht eingecheckt). In Wazuh-Konfigurationen, Intune-Einstellungen und
+  FortiGate-Objekten werden Passwörter, Keys, PSKs, Tokens und Webhooks vor dem Prompt und vor dem Wiki maskiert.
+- **Embeddings und Fragen** laufen über dasselbe lokale Ollama; Index und Fragen liegen in der lokalen SQLite-Datenbank.
 - **Oberfläche:** Basic-Auth (Pflicht), CSRF-Schutz, strikte Content-Security-Policy, keine externen Skripte oder Fonts,
   standardmäßig nur auf `127.0.0.1` gebunden. Der Agent-Container läuft ohne Root, mit read-only Dateisystem und
   ohne Capabilities.
@@ -232,7 +321,7 @@ nur Erklärungen, Beschreibungen und freie Texte. So bleiben Fakten korrekt, auc
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest                      # Unit- und Komponententests (Fakes für Wiki.js, Netbox, LLM)
+.venv/bin/pytest                      # Unit- und Komponententests (Fakes für Wiki.js, Netbox, Graph, FortiGate, LLM)
 ```
 
 Integrationstests gegen echte Test-Instanzen (werden ohne Variablen übersprungen; nie gegen Produktion laufen lassen,
@@ -242,6 +331,7 @@ sie legen Testseiten bzw. Testobjekte an):
 DOKU_IT_WIKI_URL=http://127.0.0.1:3000 DOKU_IT_WIKI_KEY=… \
 DOKU_IT_NETBOX_URL=http://127.0.0.1:8000 DOKU_IT_NETBOX_TOKEN=nbt_… \
 DOKU_IT_WAZUH_URL=https://127.0.0.1:55000 DOKU_IT_WAZUH_USER=… DOKU_IT_WAZUH_PASSWORD=… DOKU_IT_WAZUH_INSECURE=1 \
+DOKU_IT_OLLAMA_URL=http://127.0.0.1:11434 \
 .venv/bin/pytest tests/test_integration_*.py
 ```
 
@@ -251,7 +341,10 @@ Aufbau und Entscheidungen: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
 
 - Wiki.js 3.x wird nicht unterstützt (andere API). Seiten im Visual Editor werden nicht bearbeitet.
 - Der Netbox-Abgleich löscht nie etwas und ändert den Gerätetyp nur, wenn er „Unbekannt“ ist. Status (z.B. offline)
-  wird nicht gepflegt. Wiki-Seiten werden nach einer Umbenennung nicht verschoben (nur der Titel ändert sich).
+  wird nicht gepflegt (`last_seen` zeigt aber, wann eine Maschine zuletzt gemeldet hat). Wiki-Seiten werden nach einer
+  Umbenennung nicht verschoben (nur der Titel ändert sich).
+- Firewalls: nur FortiGate (FortiOS 7.x). SSL-VPN, Security-Profile im Detail und SD-WAN werden nicht dokumentiert.
+- Fragen ans Wiki kennen nur Wiki-Inhalte, keine Live-Daten aus Netbox oder Wazuh.
 - Wazuh-Alarm-Auswertungen aus dem Indexer sind nicht enthalten (bewusst ausgeklammert).
 - Bilder bzw. Screenshots in Aufträgen werden nicht ausgewertet (Vision-Modell auf CPU zu langsam).
 

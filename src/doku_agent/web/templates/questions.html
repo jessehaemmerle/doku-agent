@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Fragen ans Wiki{% endblock %}
+{% block content %}
+<h1>Fragen ans Wiki</h1>
+<p class="lede">Stelle eine Frage in eigenen Worten. Der Agent sucht passende Abschnitte im Wiki (lokale Embeddings) und antwortet nur auf deren Grundlage, mit Quellenangabe. Nichts verlässt den Server.</p>
+{% if not ready %}<p class="flash err">Der Suchindex ist noch leer. Starte einmal den Job „{{ jobs['wiki_index'][0] }}“ – danach hält er sich nachts und nach jeder Freigabe selbst aktuell.</p>{% endif %}
+<form method="post" action="/fragen" class="sheet">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="question">Deine Frage</label>
+  <input type="text" id="question" name="question" required maxlength="1000" placeholder="z.B. Wo läuft der Lizenzserver?">
+  <div class="actions"><button class="primary" type="submit">Fragen</button>
+    <span class="muted">Auf CPU dauert eine Antwort meist unter einer Minute; läuft gerade ein Job, etwas länger.</span></div>
+</form>
+
+<h2>Letzte Fragen</h2>
+<div class="list">
+  {% for q in questions %}
+  <a href="/fragen/{{ q.id }}">
+    <span class="id">#{{ q.id }}</span>
+    <span class="title">{{ q.question }}<span class="sub">{{ q.created_at[:16].replace('T', ' ') }}</span></span>
+    <span class="status {{ q.status }}">{{ status_labels.get(q.status, q.status) }}</span>
+  </a>
+  {% else %}<p class="empty">Noch keine Fragen gestellt.</p>{% endfor %}
+</div>
+{% endblock %}

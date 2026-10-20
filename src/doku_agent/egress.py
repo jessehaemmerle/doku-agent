@@ -32,6 +32,8 @@ def allowed_hosts(cfg: Config) -> set[str]:
         hosts.add(_host(cfg.wazuh.url))
     if cfg.intune.enabled:
         hosts.update(GRAPH_HOSTS)
+    if cfg.fortigate.enabled:
+        hosts.update(_host(d.url) for d in cfg.fortigate.devices)
     hosts.update(h.lower() for h in cfg.egress.extra_allowed_hosts)
     hosts.discard("")
     return hosts
