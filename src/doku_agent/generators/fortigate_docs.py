@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from doku_agent import markdown
 from doku_agent.connectors.fortigate import FortiGateClient
 from doku_agent.context import Context
-from doku_agent.generators.common import MASK, STYLE_RULES, cached, digest
+from doku_agent.generators import narrative
+from doku_agent.generators.common import MASK, STYLE_RULES, digest
 from doku_agent.pages import Block, PageDraft, propose_page
 
 POLICY_BATCH = 6  # Regeln pro LLM-Aufruf (Kontextbudget eines 8B-Modells auf CPU)
@@ -321,11 +322,14 @@ def _explain(ctx: Context, data: FortiData, views: list[dict]) -> dict[str, str]
     return out
 
 
-def _summary(ctx: Context, key: str, task: str, text: str) -> str:
-    if not text.strip():
+def _summary(ctx: Context, data: FortiData, key: str, task: str, counts: str, rows: str, fallback: str) -> str:
+    """Fließtext über einer Tabelle (mit Faktenprüfung gegen genau diese Daten); leer ohne Daten bzw. wenn das
+    Sprachmodell nicht erreichbar ist."""
+    if not rows.strip():
         return ""
-    return cached(ctx, f"fortigate-{key}:" + digest(text), lambda: ctx.llm.text(
-        "Du bist Experte für FortiGate-Firewalls. " + STYLE_RULES, f"{task}\n\n{ctx.llm.fit(text)}"))
+    facts = f"Firewall: {data.system.get('hostname', data.device)}, VDOM {data.vdom}\n{counts}\n{rows}"
+    return narrative.narrate(ctx, f"fortigate-{key}:{data.device}:{data.vdom}", expert="FortiGate-Firewalls",
+                             task=task, facts=facts, fallback=fallback) or ""
 
 
 def _overview(data: FortiData, extra: list[list]) -> str:
@@ -373,11 +377,15 @@ def policies_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
     compact = "\n".join(f"ID {v['id']} {v['name']}: {v['von']} -> {v['nach']}, Quelle {_join(v['quelle'])}, "
                         f"Ziel {_join(v['ziel'])}, Dienst {_join(v['dienst'])}, {v['aktion']}, NAT {v['nat']}"
                         for v in views)
-    summary = _summary(ctx, "policies-summary",
-                       "Fasse dieses Firewall-Regelwerk in 4-8 Stichpunkten zusammen: welche Interfaces/Zonen "
+    enabled = sum(1 for p in data.policies if p.get("status") != "disable")
+    summary = _summary(ctx, data, "policies-summary",
+                       "Beschreibe dieses Firewall-Regelwerk im Zusammenhang: welche Interfaces bzw. Zonen "
                        "miteinander kommunizieren dürfen, was ins Internet darf, was aus dem Internet erreichbar "
                        "ist und welche Regeln auffällig breit sind. Die Regeln werden von oben nach unten "
-                       "geprüft, die erste passende gilt.", compact)
+                       "geprüft, die erste passende gilt.",
+                       f"Regeln gesamt: {len(views)}, davon aktiv: {enabled}", compact,
+                       f"Das Regelwerk umfasst {len(views)} Regeln, davon {enabled} aktiv. Sie werden von oben nach "
+                       f"unten geprüft; die erste passende Regel gilt.")
     details = []
     for v in views:
         expl = explanations.get(v["id"]) or "_Keine Erläuterung erzeugt._"
@@ -389,7 +397,6 @@ def policies_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
             rows.append(["Kommentar", v["kommentar"]])
         details.append(f"### Regel {v['id']}{' – ' + v['name'] if v['name'] else ''}\n\n{expl}\n\n"
                        + markdown.table(["Eigenschaft", "Wert"], rows))
-    enabled = sum(1 for p in data.policies if p.get("status") != "disable")
     overview = _overview(data, [["Regeln", f"{len(views)} ({enabled} aktiv)"]])
     if summary:
         overview = f"{summary}\n\n{overview}"
@@ -436,10 +443,14 @@ def nat_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
             ["ID", "Von → Nach", "Quelle", "Ziel", "NAT", "Status", "Kommentar"], snat_rows))
     text = "\n".join([*(" | ".join(map(str, r)) for r in vip_rows), *(" | ".join(map(str, r)) for r in snat_rows),
                       *(" | ".join(map(str, r)) for r in nat_rows)])
-    summary = _summary(ctx, "nat-summary",
-                       "Fasse die NAT-Konfiguration dieser FortiGate in 3-6 Stichpunkten zusammen: welche internen "
-                       "Dienste aus dem Internet erreichbar sind (VIPs) und wie ausgehender Verkehr übersetzt wird.",
-                       text)
+    summary = _summary(ctx, data, "nat-summary",
+                       "Beschreibe die NAT-Konfiguration dieser FortiGate: welche internen Dienste aus dem Internet "
+                       "erreichbar sind (virtuelle IPs, Portweiterleitungen) und wie ausgehender Verkehr übersetzt "
+                       "wird.",
+                       f"Virtuelle IPs: {len(vip_rows)}, IP-Pools: {len(pool_rows)}, Regeln mit NAT: {len(nat_rows)}",
+                       text,
+                       f"Die FortiGate hat {len(vip_rows)} virtuelle IPs, {len(pool_rows)} IP-Pools und "
+                       f"{len(nat_rows)} Regeln mit Quell-NAT.")
     overview = _overview(data, [["Virtuelle IPs", len(vip_rows)], ["IP-Pools", len(pool_rows)],
                                 ["Regeln mit NAT", len(nat_rows)]])
     if summary:
@@ -515,6 +526,20 @@ def network_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
     ]
     overview = _overview(data, [["Interfaces", len(if_rows)], ["Zonen", len(zone_rows)],
                                 ["Statische Routen", len(route_rows)]])
+    if narrative.enabled(ctx, "overview"):
+        text = "\n".join([*("Interface: " + " | ".join(map(str, r)) for r in if_rows),
+                          *("Zone: " + " | ".join(map(str, r)) for r in zone_rows),
+                          *("Route: " + " | ".join(map(str, r)) for r in route_rows)])
+        summary = _summary(ctx, data, "network-summary",
+                           "Beschreibe den Netzaufbau dieser FortiGate: welche Netze bzw. VLANs an welchen "
+                           "Interfaces hängen und welche Rolle sie haben (LAN, WAN, DMZ), wie Zonen gebildet sind, "
+                           "wohin der Standardweg führt und auf welchen Interfaces die Verwaltung erreichbar ist.",
+                           f"Interfaces: {len(if_rows)}, Zonen: {len(zone_rows)}, statische Routen: "
+                           f"{len(route_rows)}", text,
+                           f"Die FortiGate hat {len(if_rows)} Interfaces, {len(zone_rows)} Zonen und "
+                           f"{len(route_rows)} statische Routen.")
+        if summary:
+            overview = f"{summary}\n\n{overview}"
     return "Interfaces, VLANs, Zonen und statische Routen der FortiGate.", [
         Block("fortigate-network-overview", "Übersicht", overview),
         Block("fortigate-network-tables", "Netzwerk", "\n\n".join(body)),
@@ -553,10 +578,12 @@ def vpn_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
             p2_rows) if p2_rows else "_Keine._"),
     ]
     text = "\n".join(" | ".join(map(str, row)) for row in p1_rows + p2_rows)
-    summary = _summary(ctx, "vpn-summary",
-                       "Fasse die IPsec-VPNs dieser FortiGate in 3-6 Stichpunkten zusammen: welche Standorte bzw. "
-                       "Gegenstellen mit welchen Netzen verbunden sind und welche Verfahren genutzt werden. Weise "
-                       "auf veraltete Verfahren hin (z.B. IKEv1, 3DES, SHA1, DH-Gruppe 2 oder 5).", text)
+    summary = _summary(ctx, data, "vpn-summary",
+                       "Beschreibe die IPsec-VPNs dieser FortiGate: welche Standorte bzw. Gegenstellen mit welchen "
+                       "Netzen verbunden sind und welche Verfahren genutzt werden. Weise auf veraltete Verfahren hin "
+                       "(z.B. IKEv1, 3DES, SHA1 oder schwache DH-Gruppen), aber nur, wenn sie in den Daten vorkommen.",
+                       f"IPsec-Tunnel: {len(p1_rows)}, Phase-2-Selektoren: {len(p2_rows)}", text,
+                       f"Die FortiGate hat {len(p1_rows)} IPsec-Tunnel mit {len(p2_rows)} Phase-2-Selektoren.")
     overview = _overview(data, [["IPsec-Tunnel", len(p1_rows)], ["Phase-2-Selektoren", len(p2_rows)]])
     if summary:
         overview = f"{summary}\n\n{overview}"
@@ -853,6 +880,14 @@ def audit_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
     labels = {"shadowed": "Verdeckte Regeln", "any_any": "any-any", "no_log": "ohne Logging",
               "no_profile": "Internet ohne Profil", "disabled": "deaktiviert", "unused": "unbenutzte Objekte"}
     overview = _overview(data, [[labels[k], len(v)] for k, v in f.items()])
+    blocks = []
+    text = narrative.assessment(
+        ctx, f"fortigate-audit:{data.device}:{data.vdom}", expert="FortiGate-Firewalls",
+        subject=f"FortiGate {data.system.get('hostname', data.device)}", context=f"Regeln gesamt: {len(data.policies)}",
+        sections=[(title, headers, f[key]) for title, key, headers, _ in sections]) \
+        if narrative.enabled(ctx, "audit") else None
+    if text is not None:
+        blocks.append(Block("fortigate-audit-assessment", "Bewertung", text))
     body = []
     for title, key, headers, note in sections:
         rows = f[key]
@@ -861,7 +896,7 @@ def audit_page(ctx: Context, data: FortiData) -> tuple[str, list[Block]]:
     return ("Automatische Prüfung des Regelwerks: verdeckte und zu breite Regeln, fehlendes Logging, Internet-Verkehr "
             "ohne Sicherheitsprofil, deaktivierte Regeln und unbenutzte Objekte. Verdeckte Regeln werden nur für "
             "auflösbare Objekte erkannt (IP-Netze, Bereiche, Ports); FQDN- und Länderobjekte gelten nur bei gleichem "
-            "Namen als abgedeckt."), [
+            "Namen als abgedeckt."), blocks + [
         Block("fortigate-audit-overview", "Übersicht", overview),
         Block("fortigate-audit-findings", "Befunde", "\n\n".join(body)),
     ]

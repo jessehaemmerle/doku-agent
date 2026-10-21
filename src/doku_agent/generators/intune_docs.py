@@ -7,7 +7,8 @@ import json
 from doku_agent import markdown
 from doku_agent.connectors.intune import IntuneError
 from doku_agent.context import Context
-from doku_agent.generators.common import STYLE_RULES, cached, digest, mask_value
+from doku_agent.generators import narrative
+from doku_agent.generators.common import mask_value
 from doku_agent.pages import Block, PageDraft, propose_page
 
 SKIP_KEYS = {"id", "displayName", "description", "createdDateTime", "lastModifiedDateTime", "version",
@@ -143,18 +144,15 @@ def settings_catalog_rows(settings: list[dict]) -> list[tuple[str, str]]:
     return rows
 
 
-def _describe(ctx: Context, name: str, kind: str, rows: list[tuple[str, str]]) -> str:
-    settings_text = "\n".join(f"- {k}: {v}" for k, v in rows[:150])
-
-    def ask():
-        return ctx.llm.text(
-            "Du bist Microsoft-Intune-Experte und dokumentierst Richtlinien für das IT-Team. " + STYLE_RULES,
-            f"Richtlinie '{name}' ({kind}). Beschreibe in 3-6 Sätzen den Zweck und die wichtigsten Auswirkungen "
-            f"auf Geräte und Benutzer. Nenne nur, was aus den Einstellungen hervorgeht.\n\n"
-            f"Einstellungen:\n{ctx.llm.fit(settings_text)}",
-        )
-
-    return cached(ctx, "intune:" + digest(name, kind, rows), ask)
+def _describe(ctx: Context, name: str, kind: str, rows: list[tuple[str, str]]) -> str | None:
+    facts = f"Richtlinie: {name}\nTyp: {kind}\n" + "\n".join(f"{k}: {v}" for k, v in rows[:150])
+    return narrative.narrate(
+        ctx, f"intune:{kind}", expert="Microsoft Intune", facts=facts,
+        fallback=f"Die Richtlinie **{name}** ({kind}) setzt {len(rows)} Einstellungen; sie stehen in der Tabelle unten.",
+        task="Beschreibe Zweck und Wirkung dieser Intune-Richtlinie für die Dokumentation. Fasse die Einstellungen "
+             "thematisch zusammen (z.B. Kennwort, Verschlüsselung, Updates, Gerätesteuerung) statt sie einzeln "
+             "aufzuzählen, erkläre kurz, was sie für Geräte und Benutzer bedeuten und warum man so etwas einstellt. "
+             "Nenne nur, was aus den Einstellungen hervorgeht.")
 
 
 def _policy_page(ctx: Context, policy: dict, category: str, rows: list[tuple[str, str]], kind: str,
@@ -163,7 +161,7 @@ def _policy_page(ctx: Context, policy: dict, category: str, rows: list[tuple[str
     record_usage(usage, category, name, policy.get("_assignments", []))
     rows = [(k, str(mask_value(k, v))) for k, v in rows]
     description = _describe(ctx, name, kind, rows) if rows else "_Keine Einstellungen gesetzt._"
-    if policy.get("description"):
+    if description is not None and policy.get("description"):  # None: Sprachmodell nicht erreichbar
         description = f"> {policy['description']}\n\n{description}"
     basics = markdown.table(["Eigenschaft", "Wert"], [
         ["Name", name], ["Typ", kind], ["Plattform", policy.get("platforms", "")],
@@ -173,7 +171,7 @@ def _policy_page(ctx: Context, policy: dict, category: str, rows: list[tuple[str
     settings = markdown.table(["Einstellung", "Wert"], [list(r) for r in rows]) if rows else "_Keine._"
     return propose_page(ctx, PageDraft(
         doc_type="intune_policy", title=f"Intune: {name}", description=f"Intune-{category}: {name}",
-        blocks=[Block("intune-description", "Beschreibung", description),
+        blocks=([Block("intune-description", "Beschreibung", description)] if description is not None else []) + [
                 Block("intune-basics", "Grunddaten", basics),
                 Block("intune-assignments", "Zuweisungen", assignments_table(ctx, policy.get("_assignments", []))),
                 Block("intune-settings", "Einstellungen", settings)],
@@ -283,12 +281,25 @@ def document_groups(ctx: Context, usage: Usage | None = None) -> int | None:
             [[i["kind"], i["name"], i["intent"], i["effect"], i["filter"]] for i in lines]))
     table = markdown.table(["Gruppe", "Mitgliedschaft", "Dynamische Regel", "Benutzer", "Geräte", "Untergruppen",
                             "Zuweisungen"], rows) if rows else "_Keine Zuweisungen._"
+    blocks = [Block("intune-groups-table", "Gruppen", "Mitglieder inklusive verschachtelter Gruppen.\n\n" + table),
+              Block("intune-groups-assignments", "Zuweisungen je Gruppe", "\n\n".join(sections) or "_Keine._")]
+    if narrative.enabled(ctx, "overview") and rows:
+        # ohne Mitgliederzahlen: die ändern sich laufend, der Text soll nur bei geänderten Zuweisungen neu entstehen
+        structure = "\n".join(f"Gruppe {r[0]}: {r[1]}" + (f", Regel {r[2]}" if r[2] else "") for r in rows)
+        facts = structure + "\n" + narrative.facts_from_markdown("\n\n".join(sections))
+        text = narrative.narrate(
+            ctx, "intune-groups", expert="Microsoft Intune und Entra ID", facts=facts,
+            fallback=f"In Intune werden {len(rows)} Gruppen bzw. Zielgruppen für Zuweisungen verwendet; die Tabellen "
+                     f"unten zeigen, was welcher Gruppe zugewiesen ist.",
+            task="Fasse zusammen, wie Intune-Richtlinien und Apps über Gruppen verteilt werden: welche Gruppen die "
+                 "zentralen Zielgruppen sind (z.B. alle Geräte, Pilotgruppen), wo dynamische Regeln verwendet werden, "
+                 "wo Gruppen ausgeschlossen sind und was dabei auffällt.")
+        if text is not None:
+            blocks.insert(0, Block("intune-groups-summary", "Zusammenfassung", text))
     return propose_page(ctx, PageDraft(
         doc_type="intune_groups", title="Intune: Gruppen und Zuweisungen",
         description="Entra-Gruppen mit Mitgliederzahlen und allen Intune-Zuweisungen",
-        blocks=[Block("intune-groups-table", "Gruppen",
-                      "Mitglieder inklusive verschachtelter Gruppen.\n\n" + table),
-                Block("intune-groups-assignments", "Zuweisungen je Gruppe", "\n\n".join(sections) or "_Keine._")],
+        blocks=blocks,
         intro="Welche Entra-Gruppen in Intune verwendet werden, wie viele Mitglieder sie haben und was ihnen "
               "zugewiesen ist. Automatisch über Microsoft Graph (nur lesend) aktualisiert.",
         source="intune:groups", stable_id="intune:groups",

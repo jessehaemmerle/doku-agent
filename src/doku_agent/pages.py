@@ -57,8 +57,11 @@ def render_path(template: str, values: dict[str, str], style: str) -> str:
 
 
 def merge_into(content: str, blocks: list[Block], ops: list[dict]) -> tuple[str, list[str]]:
-    for block in blocks:
-        content = markdown.upsert_block(content, block.id, block.content, heading=block.heading)
+    for i, block in enumerate(blocks):
+        # Neue Blöcke (z.B. ein Überblick in einer älteren Seite) kommen vor den nächsten vorhandenen Block
+        following = next((b.id for b in blocks[i + 1:] if markdown.block_markers(b.id)[0] in content), None)
+        content = markdown.upsert_block(content, block.id, block.content, heading=block.heading,
+                                        before_block=following)
     notes: list[str] = []
     if ops:
         content, notes = markdown.apply_operations(content, ops)

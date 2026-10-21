@@ -80,8 +80,10 @@ def has_block(md: str, block_id: str) -> bool:
     return begin in md and end in md
 
 
-def upsert_block(md: str, block_id: str, content: str, heading: str | None = None, level: int = 2) -> str:
-    """Ersetzt den Inhalt eines verwalteten Blocks oder hängt ihn (mit Überschrift) an."""
+def upsert_block(md: str, block_id: str, content: str, heading: str | None = None, level: int = 2,
+                 before_block: str | None = None) -> str:
+    """Ersetzt den Inhalt eines verwalteten Blocks. Fehlt er, kommt er unter die passende Überschrift,
+    sonst als neuer Abschnitt vor den Abschnitt mit dem Block `before_block` (falls vorhanden) bzw. ans Ende."""
     begin, end = block_markers(block_id)
     body = f"{begin}\n{content.strip()}\n{end}"
     if begin in md and end in md:
@@ -92,6 +94,15 @@ def upsert_block(md: str, block_id: str, content: str, heading: str | None = Non
         if sec is not None:
             return _insert_at_section_end(md, sec, body)
         body = f"{'#' * level} {heading}\n\n{body}"
+    anchor = block_markers(before_block)[0] if before_block else None
+    if anchor and anchor in md:
+        lines = md.splitlines()
+        marker = next(i for i, line in enumerate(lines) if anchor in line)
+        # Abschnitt (ab Ebene 2), in dem der Block steht; eine H1-Seitenüberschrift bleibt oben
+        owner = next((s for s in sections(md) if s.level >= 2 and s.start <= marker < s.end), None)
+        at = owner.start if owner else marker
+        new = lines[:at] + [*body.splitlines(), ""] + lines[at:]
+        return "\n".join(new).rstrip() + "\n"
     return md.rstrip() + "\n\n" + body + "\n"
 
 

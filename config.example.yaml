@@ -168,6 +168,15 @@ coverage:
   intune_roles: [client]
   stale_days: 30
 
+# Fließtext über den Tabellen: Überblick im Steckbrief, Bewertung auf Prüfseiten, Zusammenfassung auf
+# Übersichtsseiten. Fakten kommen aus den Quelldaten; jede IP, Zahl, Version und jeder Name im Text wird gegen
+# diese Daten geprüft (sonst zweiter Versuch, danach feste Vorlage). Unveränderte Daten -> Text aus dem Cache.
+narrative:
+  enabled: true
+  areas: [steckbrief, audit, overview]
+  length: detailed             # detailed = 2-4 Absätze, auch für Nicht-Spezialisten; compact = ein Absatz
+  fact_check: true
+
 # Lokale Embeddings (gleiches Ollama) für Fragen ans Wiki und bessere Seitenwahl bei freien Aufträgen
 embeddings:
   enabled: true

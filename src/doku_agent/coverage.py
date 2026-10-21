@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from doku_agent import markdown, netbox_fields
 from doku_agent.context import Context
 from doku_agent.discovery import Asset, NetboxIndex
+from doku_agent.generators import narrative
 from doku_agent.pages import Block, PageDraft, propose_page
 
 DEVICE = "dcim/devices"
@@ -83,7 +84,18 @@ def propose_coverage(ctx: Context, assets: list[Asset], index: NetboxIndex) -> i
          f"Letzter Kontakt laut Wazuh/Intune älter als {cfg.stale_days} Tage."),
     ]
     summary = markdown.table(["Prüfung", "Befunde"], [[title, len(report[key])] for _, title, key, _, _ in sections])
-    blocks = [Block("cov-summary", "Zusammenfassung", summary)]
+    blocks = []
+    text = narrative.assessment(
+        ctx, "coverage", expert="IT-Betrieb, Asset-Management und Endpoint-Security",
+        subject="der Abdeckung von Wazuh, Intune und Netbox",
+        context=f"Wazuh-Pflicht für Netbox-Rollen: {', '.join(cfg.wazuh_roles)}\n"
+                f"Intune-Pflicht für Netbox-Rollen: {', '.join(cfg.intune_roles)}\n"
+                f"Funkstille ab: {cfg.stale_days} Tagen",
+        sections=[(title, headers, report[key]) for _, title, key, headers, _ in sections]) \
+        if narrative.enabled(ctx, "audit") else None
+    if text is not None:
+        blocks.append(Block("cov-assessment", "Bewertung", text))
+    blocks.append(Block("cov-summary", "Zusammenfassung", summary))
     for block_id, title, key, headers, note in sections:
         rows = report[key]
         blocks.append(Block(block_id, title, f"{note}\n\n" + (markdown.table(headers, rows) if rows else "_Keine._")))

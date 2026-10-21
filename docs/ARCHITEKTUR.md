@@ -27,6 +27,7 @@
 | FortiGate → Netbox (20.10.2026) | Gerät + Interfaces, IPs, VLANs, Präfixe, alles mit Freigabe | `fortigate_netbox.py`, Job `fortigate_netbox` |
 | Abdeckung (20.10.2026) | Wazuh auf Servern und Clients, Intune auf Clients, Netbox für alles, Funkstille 30 Tage | `coverage.py`, nach jeder Discovery, Seite ohne Datum |
 | Entra ID (21.10.2026) | Conditional Access (+ Standorte, Stärken), Authentifizierungsmethoden, Mandanten-Einstellungen, Rollen inkl. PIM; Übersicht + Seite je CA-Richtlinie mit LLM-Erklärung; Benutzer als Name + UPN; Prüfseite | `connectors/graph.py` (gemeinsame Basis für Intune und Entra), `connectors/entra.py`, `generators/entra_docs.py`, Job `entra` |
+| Fließtext (21.10.2026) | Steckbriefe, Prüfseiten, Übersichten und Einstellungsseiten mit Text; Tabellen bleiben darunter; automatische Faktenprüfung; ausführlich (2–4 Absätze) | `generators/narrative.py` (`narrate`, `assessment`, `unverified`), neue Blöcke über bestehenden (`markdown.upsert_block(before_block=…)`), `narrative.*` in der Konfiguration |
 | Firewall im Steckbrief / Prüfung (20.10.2026) | Regeln über Host-, Bereichs-, VIP-Objekte und Netze bis /24; Hygiene-Check als eigene Seite je Firewall | `fortigate_docs.machine_rules`, `fortigate_docs.audit` (Intervall-Mengen für Adressen und Dienste) |
 
 ## Module
@@ -55,7 +56,8 @@ src/doku_agent/
   lint.py          Wiki-Lint: tote Links, Dubletten, ohne Tags, veraltete Seiten (Neuberechnung über stable_id), Korrekturen
   connectors/      netbox.py, wazuh.py, graph.py (Graph-Basis: Token, 403-Meldungen), intune.py, entra.py,
                    fortigate.py, vcenter.py, snmp.py
-  generators/      wazuh_docs, intune_docs, entra_docs, netbox_docs, fortigate_docs, freeform,
+  generators/      narrative (Fließtext + Faktenprüfung), wazuh_docs, intune_docs, entra_docs, netbox_docs,
+                   fortigate_docs, freeform,
                    common (Maskierung, Cache, Stil)
   jobs.py          Job-Registry, Job-Log, Worker-Thread
   scheduler.py     Tages-Zeitplan
@@ -208,4 +210,37 @@ Das Code-Review fand zehn weitere Punkte; alle sind behoben und mit Tests in `te
 - Link und Pfad einer Richtlinie ohne Namen passten nicht zusammen.
 - `]` im Richtliniennamen brach den Link.
 - Die Berechtigungsprüfung wird jetzt aus denselben Datengruppen abgeleitet wie der Job.
+
+## Fließtext mit Faktenprüfung (21.10.2026)
+
+Grundsatz bleibt: Fakten entstehen deterministisch, das LLM formuliert nur. Neu ist, dass es auf den meisten Seiten
+erklärenden Text über den Tabellen schreibt. Ablauf in `narrative.narrate`:
+
+1. Der Aufrufer stellt die Fakten als Text zusammen, entweder als „Bezeichnung: Wert“-Zeilen oder direkt aus den
+   Tabellen der Seite (`facts_from_markdown`). Speichergrößen stehen schon in MB und GB darin.
+2. Das LLM schreibt Fließtext mit festen Regeln: keine Listen, keine eigenen Zahlen, Namen exakt übernehmen.
+3. `unverified` sucht im Text IPv4-, IPv6- und MAC-Adressen, Zahlen (auch mit Einheit, Tausendertrennzeichen und
+   deutschem Datum), technische Namen mit Ziffern, Punkt, Unterstrich oder @ sowie zitierte und technisch aussehende
+   fett gesetzte Namen. Jede Angabe muss als eigenes Wort in den Fakten stehen:
+   - `10.0.0.1` gilt nicht durch `10.0.0.15` als belegt, `srv1` nicht durch `srv10`, `7.4` nicht durch `7.4.5`.
+   - Zahlen zählen nur, wenn sie in den Fakten als eigene Angabe vorkommen; Oktette einer IP-Adresse zählen nicht.
+4. Bei unbelegten Angaben gibt es einen zweiten Versuch mit genau dieser Liste. Scheitert er, gilt eine feste
+   Vorlage, die nach `RETRY_FALLBACK_DAYS` erneut versucht wird.
+5. Ergebnis und Vorlage werden nach Eingabe-Hash gespeichert. Ist das LLM nicht erreichbar, liefert `narrate`
+   None: Der Abschnitt entfällt, ein bestehender bleibt im Wiki unverändert, und im selben Lauf wird nicht erneut
+   gewartet.
+
+Grenzen: Ausgeschriebene Zahlwörter und allgemeine Aussagen ohne Ziffern werden nicht geprüft. Eine Zahl kann
+zufällig an anderer Stelle in den Fakten stehen, etwa eine Regel-ID gleich einer Anzahl. Die Prüfung senkt das Risiko
+erfundener Details deutlich, ersetzt aber nicht das Lesen bei der Freigabe.
+
+Das Code-Review fand neun Punkte; alle sind behoben und in `tests/test_narrative.py` abgesichert:
+- Neue Abschnitte konnten über einer H1-Seitenüberschrift landen.
+- Ohne Sprachmodell scheiterten auch Seiten, die vorher ohne LLM auskamen.
+- Die Prüfung verglich Teilstrings und zählte IP-Oktette als Zahlen.
+- Leere FortiGate-Bereiche riefen das LLM auf.
+- Die Entra-Bewertung verschwieg fehlende PIM-Daten.
+- Eine Vorlage blieb für immer gespeichert.
+- Gemeldet wurden Token-Teile statt der ganzen Angabe.
+- Kleine VMs bekamen „0 GB“.
 

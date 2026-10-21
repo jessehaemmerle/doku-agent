@@ -331,6 +331,16 @@ class EgressConfig(BaseModel):
     trust_env: bool = False
 
 
+class NarrativeConfig(BaseModel):
+    """Fließtext über den Tabellen. Fakten stammen immer aus den Quelldaten; das LLM formuliert nur."""
+    enabled: bool = True
+    # Zusätzliche Textabschnitte: Überblick im Steckbrief, Bewertung auf Prüfseiten, Überblick auf Übersichtsseiten
+    areas: list[Literal["steckbrief", "audit", "overview"]] = Field(
+        default_factory=lambda: ["steckbrief", "audit", "overview"])
+    length: Literal["detailed", "compact"] = "detailed"
+    fact_check: bool = True  # Angaben im Text gegen die Daten prüfen; sonst zweiter Versuch bzw. feste Vorlage
+
+
 class Config(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -343,6 +353,7 @@ class Config(BaseModel):
     switches: SwitchesConfig = Field(default_factory=SwitchesConfig)
     vcenter: VCenterConfig = Field(default_factory=VCenterConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
+    narrative: NarrativeConfig = Field(default_factory=NarrativeConfig)
     lint: LintConfig = Field(default_factory=LintConfig)
     coverage: CoverageConfig = Field(default_factory=CoverageConfig)
     schedule: list[ScheduleEntry] = Field(default_factory=list)

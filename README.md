@@ -44,7 +44,7 @@ der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekt
 | **vCenter** | Cluster, ESXi-Hosts (Hersteller, Modell, Seriennummer) und VMs mit vCPU, RAM, NICs, Gast-IPs und Disks | Teil der Discovery: Cluster und Hosts als Geräte, VMs im Cluster auf ihrem Host, virtuelle Disks einzeln; auch ausgeschaltete VMs |
 | **Switches** | SNMP: Systemdaten, Ports, LLDP-Nachbarn, MAC-Tabelle | Je Switch ein Vorschlag: Gerät, Ports und **Kabel** zu LLDP-Nachbarn und zu Endgeräten an Ports mit genau einer bekannten MAC |
 | **FortiGate → Netbox** | Interfaces, VLANs, IPs der Firewall | Gerät mit Interfaces (LAG-Mitglieder, VLAN-Parent), IP-Adressen samt primärer IP, VLANs und Präfixe; alles einzeln freigebbar |
-| **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces, IPs und Kabeln | Wiki-Seite pro Maschine mit „Verbunden mit“ je Port und den **Firewall-Regeln**, die die Maschine betreffen; der Netbox-Teil wird bei Änderungen aktualisiert |
+| **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces, IPs und Kabeln | Wiki-Seite pro Maschine: oben ein **Überblick in Fließtext** (was sie ist, wo sie läuft, wie sie angebunden ist, welche Firewall-Regeln sie betreffen), darunter die Tabellen mit „Verbunden mit“ je Port und den **Firewall-Regeln**; wird bei Änderungen aktualisiert |
 | **Abdeckung** | Netbox gegen Wazuh, Intune und vCenter | Seite `infrastruktur/abdeckung`: Maschinen ohne Wazuh-Agent, Clients ohne Intune, Maschinen, die in Netbox fehlen, und Funkstille seit über 30 Tagen |
 | **Wazuh-Regeln/Decoder** | Liest `etc/rules` bzw. `etc/decoders`, parst das XML | Seite pro Datei: Übersicht, Regel-Tabelle (Level, Bedingungen, MITRE) und Erläuterung jeder Regel durch das LLM |
 | **Wazuh-Konfiguration** | `ossec.conf` des Managers und `agent.conf` jeder Gruppe | Zusammenfassung und Einstellungen je Abschnitt; Passwörter, API-Keys und Webhooks werden maskiert |
@@ -464,6 +464,40 @@ Modell wechseln: `llm.model` in `config.yaml` und `LLM_MODEL` in `.env` anpassen
 `docker compose --profile setup run --rm ollama-pull` und `docker compose restart agent`.
 Strukturierte Daten (Tabellen, Steckbriefe, Netbox-Pläne) erzeugt der Agent immer deterministisch, das LLM schreibt
 nur Erklärungen, Beschreibungen und freie Texte. So bleiben Fakten korrekt, auch wenn das kleine Modell schwächelt.
+
+## Fließtext und Faktenprüfung
+
+Damit Seiten lesbar sind und nicht nur aus Tabellen bestehen, steht über den Tabellen erklärender Text:
+
+| Seite | Abschnitt | Inhalt |
+|---|---|---|
+| Steckbrief | **Überblick** | Was die Maschine ist, wofür sie laut Rolle und Beschreibung dient, wo sie läuft, wie sie angebunden ist, welche Firewall-Regeln sie betreffen |
+| Prüfseiten (FortiGate, Entra ID, Abdeckung) | **Bewertung** | Gesamtzustand, die dringendsten Befunde mit Begründung und die nächsten Schritte in sinnvoller Reihenfolge |
+| Übersichten (Conditional Access, Methoden, Mandant, Rollen, Intune-Gruppen, Firewall-Regeln/Netzwerk/NAT/VPN, SCA) | **Zusammenfassung** | Der Ist-Zustand im Zusammenhang |
+| Einstellungsseiten (Intune-Richtlinien, Wazuh-Konfiguration, CA-Richtlinien) | **Beschreibung** | Einstellungen thematisch erklärt statt einzeln aufgezählt |
+
+Die Tabellen bleiben vollständig darunter. Der Text entsteht aus genau den Daten, die auch in den Tabellen stehen, und
+wird danach automatisch geprüft:
+
+- Jede **IP-Adresse, Zahl, Version, jedes Datum** und jeder **technische Name** im Text (Hostnamen, Domains, UPNs,
+  Dateinamen, zitierte oder fett gesetzte Namen) muss in den Daten vorkommen. Zahlen mit Einheit („16 GB“) und
+  deutsche Datumsangaben werden erkannt. Speichergrößen bekommt das Modell schon in MB und GB, damit es nicht rechnet.
+- Findet die Prüfung unbelegte Angaben, bekommt das Modell einen zweiten Versuch mit genau dieser Liste. Scheitert
+  auch der, steht statt des Textes eine **feste Vorlage** aus denselben Daten, und das Job-Protokoll nennt die Angaben.
+- Allgemeines Fachwissen ohne konkrete Zahlen („MFA erschwert die Übernahme von Konten“) ist erlaubt. Ausgeschriebene
+  Zahlwörter („zwei“) werden nicht geprüft.
+- Texte werden nach Eingabe-Hash zwischengespeichert. Unveränderte Daten erzeugen keinen neuen Text und keinen neuen
+  Vorschlag. Mitgliederzahlen von Gruppen fließen bewusst nicht in den Text ein, damit er sich nicht täglich ändert.
+
+Einstellbar unter `narrative`:
+- `areas` legt fest, wo zusätzlicher Text entsteht.
+- `length: compact` erzeugt einen Absatz statt zwei bis vier.
+- `fact_check: false` schaltet die Prüfung ab; das ist nicht empfohlen.
+- `enabled: false` schaltet die zusätzlichen Abschnitte ganz ab.
+
+**Nach dem Update:** Bestehende Seiten bekommen die neuen Abschnitte als normalen Vorschlag mit Diff, oben eingefügt.
+Eigene Texte bleiben unverändert. Beim ersten Lauf entsteht dafür viel Text auf einmal, mit entsprechend Rechenzeit (siehe
+Messwerte unten). Danach wird nur noch geänderter Inhalt neu formuliert.
 
 ## Datenschutz und Sicherheit
 

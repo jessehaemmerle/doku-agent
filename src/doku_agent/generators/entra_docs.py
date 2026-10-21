@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from doku_agent import markdown
 from doku_agent.connectors.graph import GraphError
 from doku_agent.context import Context
-from doku_agent.generators.common import STYLE_RULES, cached, digest
+from doku_agent.generators import narrative
 from doku_agent.pages import Block, PageDraft, propose_page, render_path
 
 STATE = {"enabled": "Aktiv", "disabled": "Aus", "enabledForReportingButNotEnforced": "Nur Bericht"}
@@ -344,7 +344,7 @@ def _cell(values: list[str]) -> str:
 
 # --- Conditional Access ---------------------------------------------------------
 
-def _explain(ctx: Context, view: dict) -> str:
+def _explain(ctx: Context, view: dict) -> str | None:
     lines = [f"Name: {view['name']}", f"Status: {view['state']}",
              f"Benutzer: {'; '.join(view['users_in']) or '–'}", f"Ausgenommen: {'; '.join(view['users_out']) or '–'}",
              f"Ressourcen: {'; '.join(view['apps_in'] + view['actions'] + view['auth_context']) or '–'}",
@@ -352,18 +352,19 @@ def _explain(ctx: Context, view: dict) -> str:
     lines += [f"{k}: {v}" for k, v in view["conditions"]]
     lines += [f"Gewähren ({view['operator'] or 'einzeln'}): {'; '.join(view['grant']) or '–'}",
               f"Sitzung: {'; '.join(view['session']) or '–'}"]
-    text = "\n".join(lines)
-
-    def ask():
-        return ctx.llm.text(
-            "Du bist Experte für Microsoft Entra ID und Conditional Access und dokumentierst Richtlinien für das "
-            "IT-Team. " + STYLE_RULES,
-            "Erkläre in 3-5 Sätzen, was diese Conditional-Access-Richtlinie bewirkt: wen sie betrifft, wann sie "
-            "greift und was sie verlangt oder blockiert. Ist sie aus oder nur im Berichtsmodus, sage deutlich, dass "
-            "sie nicht durchgesetzt wird. Nenne nur, was aus den Angaben hervorgeht.\n\n" + text,
-        )
-
-    return cached(ctx, "entra-ca:" + digest(text), ask)
+    fallback = (f"Die Richtlinie **{view['name']}** ist im Status „{view['state']}“. Sie gilt für "
+                f"{_short(view['users_in']) or 'niemanden'}"
+                + (f" (ausgenommen {_short(view['users_out'])})" if view["users_out"] else "")
+                + f" beim Zugriff auf {_short(view['apps_in'] + view['actions']) or 'keine Ressourcen'}"
+                + (f" und verlangt bzw. bewirkt: {_short(view['grant'] + view['session'], 4)}."
+                   if view["grant"] or view["session"] else "."))
+    return narrative.narrate(
+        ctx, f"entra-ca:{view['id']}", expert="Microsoft Entra ID und Conditional Access", fallback=fallback,
+        facts="\n".join(lines),
+        task="Erkläre, was diese Conditional-Access-Richtlinie bewirkt: wen sie betrifft und wen nicht, bei welchen "
+             "Ressourcen und unter welchen Bedingungen sie greift und was sie dann verlangt oder blockiert. Erkläre "
+             "die verwendeten Steuerungen kurz und warum eine solche Richtlinie sinnvoll ist. Ist sie aus oder nur "
+             "im Berichtsmodus, sage deutlich, dass sie nicht durchgesetzt wird.")
 
 
 def ca_policy_page(ctx: Context, policy: dict, names: Names) -> int | None:
@@ -384,10 +385,11 @@ def ca_policy_page(ctx: Context, policy: dict, names: Names) -> int | None:
         ["Gewähren", _cell(view["grant"]) + (f" ({view['operator']})" if view["operator"] else "")],
         ["Sitzung", _cell(view["session"])],
     ])
+    explanation = _explain(ctx, view)  # None: Sprachmodell nicht erreichbar -> bestehende Beschreibung bleibt
     return propose_page(ctx, PageDraft(
         doc_type="entra_ca", title=f"Conditional Access: {view['name']}",
         description=f"Conditional-Access-Richtlinie {view['name']}",
-        blocks=[Block("entra-ca-description", "Beschreibung", _explain(ctx, view)),
+        blocks=([Block("entra-ca-description", "Beschreibung", explanation)] if explanation is not None else []) + [
                 Block("entra-ca-basics", "Grunddaten", basics),
                 Block("entra-ca-assignments", "Zuweisungen", assignments),
                 Block("entra-ca-conditions", "Bedingungen", conditions),
@@ -917,9 +919,23 @@ def audit_page(ctx: Context, data: EntraData, names: Names) -> tuple[str, list[B
                     + (markdown.table(headers, rows) if rows else "_Keine Befunde._"))
     note = "" if data.eligibilities is not None else \
         " Ohne PIM-Daten wird nicht geprüft, ob privilegierte Rollen dauerhaft statt berechtigt vergeben sind."
+    blocks = []
+    context = (f"Sicherheitsstandards: {'aktiv' if data.security_defaults.get('isEnabled') else 'aus'}\n"
+               f"Conditional-Access-Richtlinien: {len(data.policies)}, davon aktiv: {len(_enabled(data))}")
+    if data.eligibilities is None:
+        context += ("\nNicht geprüft: PIM-Daten fehlen, daher ist unbekannt, ob Admin-Rollen dauerhaft statt "
+                    "berechtigt vergeben sind")
+    if not ctx.cfg.entra.breakglass:
+        context += "\nKeine Notfallkonten konfiguriert, deren Ausnahmen geprüft werden könnten"
+    text = narrative.assessment(ctx, "entra-audit", expert="Microsoft Entra ID und Identitätssicherheit",
+                                subject="Entra ID", context=context,
+                                sections=[(title, headers, f[key]) for title, key, headers, _ in AUDIT_SECTIONS]) \
+        if narrative.enabled(ctx, "audit") else None
+    if text is not None:
+        blocks.append(Block("entra-audit-assessment", "Bewertung", text))
     return ("Automatische Prüfung der Entra-ID-Konfiguration: nicht durchgesetzte Richtlinien, fehlender "
             "Grundschutz, Notfallkonten, Verweise auf gelöschte Objekte, privilegierte Rollen und riskante "
-            "Mandanten-Einstellungen." + note), [
+            "Mandanten-Einstellungen." + note), blocks + [
         Block("entra-audit-overview", "Übersicht", overview),
         Block("entra-audit-findings", "Befunde", "\n\n".join(body)),
     ]
@@ -937,8 +953,29 @@ def section_stable_id(slug: str) -> str:
     return f"entra:{slug}"
 
 
+SUMMARY_TASKS = {
+    "conditional-access": "Fasse zusammen, wie der Zugriff im Mandanten über Conditional Access geregelt ist: welche "
+                          "Richtlinien aktiv sind, wer ausgenommen ist, was für Administratoren und für alle "
+                          "Benutzer gilt und welche Richtlinien noch nicht durchgesetzt werden.",
+    "authentifizierungsmethoden": "Fasse zusammen, mit welchen Methoden sich Benutzer anmelden bzw. MFA durchführen "
+                                  "können, für wen sie freigegeben sind und was das für die Sicherheit bedeutet "
+                                  "(phishing-resistente gegenüber schwachen Methoden).",
+    "mandant": "Fasse die mandantenweiten Einstellungen zusammen: Sicherheitsstandards, was normale Benutzer und Gäste "
+               "dürfen, wie App-Zustimmungen geregelt sind und wie der Zugriff mit anderen Mandanten eingestellt ist.",
+    "rollen": "Fasse zusammen, wer welche administrativen Rollen hat, ob sie dauerhaft, befristet oder nur über PIM "
+              "berechtigt vergeben sind und was das für die Sicherheit bedeutet.",
+}
+
+
 def _propose_section(ctx: Context, slug: str, heading: str, data: EntraData, names: Names) -> int | None:
     intro, blocks = BUILDERS[slug](ctx, data, names)
+    if slug in SUMMARY_TASKS and narrative.enabled(ctx, "overview"):
+        facts = narrative.facts_from_markdown("\n\n".join(f"{b.heading}\n\n{b.content}" for b in blocks))
+        fallback = f"Die Tabellen unten zeigen den aktuellen Stand der {heading} im Mandanten."
+        text = narrative.narrate(ctx, f"entra-{slug}", expert="Microsoft Entra ID", task=SUMMARY_TASKS[slug],
+                                 facts=facts, fallback=fallback)
+        if text is not None:
+            blocks.insert(0, Block(f"entra-{slug}-summary", "Zusammenfassung", text))
     return propose_page(ctx, PageDraft(
         doc_type="entra", title=f"Entra ID: {heading}", description=f"Entra ID – {heading}", blocks=blocks,
         path_vars={"section": slug},

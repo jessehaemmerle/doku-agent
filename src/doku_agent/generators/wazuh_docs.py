@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 
 from doku_agent import markdown
 from doku_agent.context import Context
+from doku_agent.generators import narrative
 from doku_agent.generators.common import STYLE_RULES, cached, digest, mask_xml, parse_xml_fragment
 from doku_agent.pages import Block, PageDraft, propose_page
 
@@ -205,19 +206,20 @@ def _config_page(ctx: Context, raw: str, name: str, title: str, source: str, wha
     if not blocks_by_section:
         ctx.log.info("%s: keine Einstellungen (leere Konfiguration) – übersprungen", title)
         return None
-    masked_xml = "\n".join(ET.tostring(c, encoding="unicode") for c in root)
-    summary = cached(ctx, f"wazuh-config:{name}:" + digest(masked_xml), lambda: ctx.llm.text(
-        "Du bist Wazuh-Experte. " + STYLE_RULES,
-        f"Beschreibe für die Dokumentation die wichtigsten Einstellungen dieser {what}: welche Module aktiv "
-        "sind, was überwacht wird (Dateien, Logs, Befehle), Intervalle und Besonderheiten. Höchstens 12 Sätze "
-        f"oder Stichpunkte.\n\n{ctx.llm.fit(masked_xml)}",
-    ))
+    facts = "\n".join(f"{label} / {k}: {v}" for label, rows in blocks_by_section.items() for k, v in rows)
+    summary = narrative.narrate(
+        ctx, f"wazuh-config:{name}", expert="Wazuh", facts=facts,
+        fallback=f"Die {what} enthält {len(blocks_by_section)} Abschnitte: {', '.join(blocks_by_section)}. Die "
+                 f"Einstellungen stehen in den Tabellen unten.",
+        task=f"Beschreibe für die Dokumentation, was diese {what} bewirkt: welche Module aktiv sind, was überwacht "
+             "wird (Dateien, Logs, Befehle, Schwachstellen), in welchen Intervallen, wohin Alarme gehen und was "
+             "auffällt. Fasse thematisch zusammen und erkläre kurz, wozu die Module dienen.")
     sections = []
     for label, rows in blocks_by_section.items():
         sections.append(f"### {label}\n\n" + markdown.table(["Einstellung", "Wert"], [list(r) for r in rows[:200]]))
     return propose_page(ctx, PageDraft(
         doc_type="wazuh_config", title=title, description=f"Wazuh {what}",
-        blocks=[Block("wazuh-config-summary", "Zusammenfassung", summary),
+        blocks=([Block("wazuh-config-summary", "Zusammenfassung", summary)] if summary is not None else []) + [
                 Block("wazuh-config-sections", "Einstellungen", "\n\n".join(sections) or "_Leer._")],
         path_vars={"name": name},
         intro=f"Automatisch erzeugte Dokumentation der Wazuh {what}. Geheimnisse (Passwörter, API-Keys, "
@@ -276,12 +278,25 @@ def document_sca(ctx: Context, agent_id: str = "") -> list[int | None]:
                 ["ID", "Prüfung", "Behebung"],
                 [[c.get("id"), c.get("title"), (c.get("remediation") or "")[:400]] for c in failed[:150]],
             ))
+        blocks = [Block("wazuh-sca-overview", "Übersicht", overview),
+                  Block("wazuh-sca-failed", "Fehlgeschlagene Prüfungen",
+                        "\n\n".join(failed_sections) or "_Keine fehlgeschlagenen Prüfungen._")]
+        if narrative.enabled(ctx, "overview"):
+            facts = f"Agent: {agent.get('name')}\n" + narrative.facts_from_markdown(
+                overview + "\n\n" + "\n\n".join(failed_sections))
+            text = narrative.narrate(
+                ctx, f"wazuh-sca:{agent['id']}", expert="Wazuh und Systemhärtung (CIS-Benchmarks)", facts=facts,
+                fallback=f"Für {agent.get('name')} liegen {len(policies)} SCA-Richtlinien vor; Scores und "
+                         f"fehlgeschlagene Prüfungen stehen in den Tabellen unten.",
+                task="Fasse das Ergebnis der Härtungsprüfung (SCA) dieser Maschine zusammen: wie gut sie laut Score "
+                     "abschneidet, in welchen Themen die meisten Prüfungen fehlschlagen und welche Maßnahmen am "
+                     "meisten bringen würden. Erkläre kurz, was SCA prüft.")
+            if text is not None:
+                blocks.insert(0, Block("wazuh-sca-summary", "Zusammenfassung", text))
         results.append(propose_page(ctx, PageDraft(
             doc_type="wazuh_sca", title=f"SCA-Ergebnisse: {agent.get('name')}",
             description=f"Security Configuration Assessment für {agent.get('name')}",
-            blocks=[Block("wazuh-sca-overview", "Übersicht", overview),
-                    Block("wazuh-sca-failed", "Fehlgeschlagene Prüfungen",
-                          "\n\n".join(failed_sections) or "_Keine fehlgeschlagenen Prüfungen._")],
+            blocks=blocks,
             path_vars={"name": agent.get("name", agent["id"])},
             intro=f"SCA-Ergebnisse des Wazuh-Agents `{agent.get('name')}` (ID {agent['id']}). Stand laut "
                   f"letztem Scan; automatisch aktualisiert.",
