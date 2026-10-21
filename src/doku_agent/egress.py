@@ -39,9 +39,16 @@ def allowed_hosts(cfg: Config) -> set[str]:
         hosts.add(_host(cfg.vcenter.url))
     if cfg.switches.enabled:  # SNMP (UDP 161), geprüft im SNMP-Client
         hosts.update(d.host.lower() for d in cfg.switches.devices)
+    if cfg.ad.enabled:  # LDAP (TLS) und SMB, geprüft in den AD-Clients
+        hosts.update(h.lower() for h in ad_servers(cfg))
     hosts.update(h.lower() for h in cfg.egress.extra_allowed_hosts)
     hosts.discard("")
     return hosts
+
+
+def ad_servers(cfg: Config) -> list[str]:
+    """Domänencontroller für LDAP und SYSVOL: eingetragene Server, sonst der Domänenname."""
+    return list(cfg.ad.servers) or ([cfg.ad.domain] if cfg.ad.domain else [])
 
 
 def snmp_networks(cfg: Config) -> list[str]:
@@ -69,6 +76,11 @@ class EgressGuard:
         except ValueError:
             return False
         return any(ip in net for net in self.snmp_networks)
+
+    def check_host(self, host: str, what: str) -> None:
+        """Für Verbindungen ohne httpx (LDAP, SMB)."""
+        if (host or "").lower() not in self.hosts:
+            raise EgressBlocked(f"{what}-Verbindung zu {host!r} blockiert (nicht in der Allowlist)")
 
     def check(self, request: httpx.Request) -> None:
         host = (request.url.host or "").lower()

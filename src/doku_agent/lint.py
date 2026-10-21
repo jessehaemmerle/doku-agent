@@ -79,6 +79,19 @@ def refresh(ctx: Context, stable_id: str) -> int | None:
                 raise
         if parts[1] in entra_docs.SLUG_AREA:
             return entra_docs.document_section(ctx, parts[1])
+    if source == "ad" and ctx.cfg.ad.enabled and len(parts) >= 2:
+        from doku_agent.generators import ad_docs
+        include = ctx.cfg.ad.include
+        if (parts[1] == "gpo" and "gpo" not in include) \
+                or (parts[1] in ad_docs.SLUG_AREA and ad_docs.SLUG_AREA[parts[1]] not in include):
+            raise Unsupported(stable_id)  # Bereich nicht mehr ausgewählt: nichts zu prüfen
+        if parts[1] == "gpo":
+            try:
+                return ad_docs.document_gpo(ctx, ":".join(parts[2:]))
+            except ad_docs.GpoGone as exc:
+                raise SourceGone("GPO im Active Directory gelöscht") from exc
+        if parts[1] in ad_docs.SLUG_AREA:
+            return ad_docs.document_section(ctx, parts[1])
     if source == "wazuh" and ctx.cfg.wazuh.enabled:
         from doku_agent.generators import wazuh_docs
         kind, rest = parts[1], ":".join(parts[2:])

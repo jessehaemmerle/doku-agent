@@ -9,7 +9,7 @@ from doku_agent.config import Config
 from doku_agent.egress import EgressGuard
 from doku_agent.store import Store
 
-CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune", "entra", "embedder", "vcenter")
+CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune", "entra", "ad", "sysvol", "embedder", "vcenter")
 
 
 class Context:
@@ -80,6 +80,22 @@ class Context:
         if not self.cfg.entra.enabled:
             raise RuntimeError("Entra ID ist in der Konfiguration deaktiviert")
         return self._shared("entra", lambda: EntraClient(self.cfg.entra, self.cfg.intune, self.guard))
+
+    @cached_property
+    def ad(self):
+        from doku_agent.connectors.ad import AdClient
+        if not self.cfg.ad.enabled:
+            raise RuntimeError("Active Directory ist in der Konfiguration deaktiviert")
+        return self._shared("ad", lambda: AdClient(self.cfg.ad, self.guard))
+
+    @cached_property
+    def sysvol(self):
+        """SYSVOL des DCs, mit dem LDAP verbunden ist (gleicher Datenstand wie die GPO-Objekte)."""
+        from doku_agent.connectors.sysvol import SysvolClient
+        if not self.cfg.ad.enabled or not self.cfg.ad.sysvol:
+            raise RuntimeError("SYSVOL ist in der Konfiguration deaktiviert (ad.sysvol)")
+        self.ad.root()  # verbindet und legt den DC fest
+        return self._shared("sysvol", lambda: SysvolClient(self.cfg.ad, self.guard, self.ad.server))
 
     @cached_property
     def vcenter(self):

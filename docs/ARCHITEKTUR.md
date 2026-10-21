@@ -27,6 +27,7 @@
 | FortiGate → Netbox (20.10.2026) | Gerät + Interfaces, IPs, VLANs, Präfixe, alles mit Freigabe | `fortigate_netbox.py`, Job `fortigate_netbox` |
 | Abdeckung (20.10.2026) | Wazuh auf Servern und Clients, Intune auf Clients, Netbox für alles, Funkstille 30 Tage | `coverage.py`, nach jeder Discovery, Seite ohne Datum |
 | Entra ID (21.10.2026) | Conditional Access (+ Standorte, Stärken), Authentifizierungsmethoden, Mandanten-Einstellungen, Rollen inkl. PIM; Übersicht + Seite je CA-Richtlinie mit LLM-Erklärung; Benutzer als Name + UPN; Prüfseite | `connectors/graph.py` (gemeinsame Basis für Intune und Entra), `connectors/entra.py`, `generators/entra_docs.py`, Job `entra` |
+| Active Directory (21.10.2026) | Gruppenrichtlinien, OU-Struktur mit Delegationen, Kennwort- und Sperrrichtlinien, privilegierte Gruppen und Domäne; GPO-Einstellungen aus SYSVOL per SMB; eigene Prüfseite | `connectors/ad.py` (ldap3, nur TLS), `connectors/sysvol.py` (smbprotocol), `ad_acl.py`, `gpo_files.py`, `generators/ad_common.py`, `ad_docs.py`, `gpo_docs.py`, Job `ad` |
 | Fließtext (21.10.2026) | Steckbriefe, Prüfseiten, Übersichten und Einstellungsseiten mit Text; Tabellen bleiben darunter; automatische Faktenprüfung; ausführlich (2–4 Absätze) | `generators/narrative.py` (`narrate`, `assessment`, `unverified`), neue Blöcke über bestehenden (`markdown.upsert_block(before_block=…)`), `narrative.*` in der Konfiguration |
 | Firewall im Steckbrief / Prüfung (20.10.2026) | Regeln über Host-, Bereichs-, VIP-Objekte und Netze bis /24; Hygiene-Check als eigene Seite je Firewall | `fortigate_docs.machine_rules`, `fortigate_docs.audit` (Intervall-Mengen für Adressen und Dienste) |
 
@@ -53,11 +54,13 @@ src/doku_agent/
   netbox_fields.py Custom Fields des Agents: Status/Anlage-Vorschlag, Werte, last_seen
   embeddings.py    Ollama /api/embed
   semantic.py      Suchindex (Abschnitte je Überschrift), Suche, Fragen mit Quellen
+  ad_acl.py        Sicherheitsbeschreibungen (MS-DTYP) lesen, Rechte in Worten, Standard- und Admin-Prinzipale
+  gpo_files.py     Registry.pol, GptTmpl.inf, audit.csv, scripts.ini, Preferences-XML, ADMX/ADML (reine Parser)
   lint.py          Wiki-Lint: tote Links, Dubletten, ohne Tags, veraltete Seiten (Neuberechnung über stable_id), Korrekturen
   connectors/      netbox.py, wazuh.py, graph.py (Graph-Basis: Token, 403-Meldungen), intune.py, entra.py,
-                   fortigate.py, vcenter.py, snmp.py
+                   fortigate.py, vcenter.py, snmp.py, ad.py (LDAP), sysvol.py (SMB)
   generators/      narrative (Fließtext + Faktenprüfung), wazuh_docs, intune_docs, entra_docs, netbox_docs,
-                   fortigate_docs, freeform,
+                   fortigate_docs, ad_common/ad_docs/gpo_docs (Active Directory), freeform,
                    common (Maskierung, Cache, Stil)
   jobs.py          Job-Registry, Job-Log, Worker-Thread
   scheduler.py     Tages-Zeitplan
@@ -85,6 +88,9 @@ Datenfluss eines Laufs: **Quelle → Generator → `PageDraft` → `propose_page
 | Netbox Virtualisierung/IPAM/Kabel | Serializer und Validierung @ 4.7.2 (Image) | `virtual-disks.size` in MB, Disk-Summe der VM wird berechnet; Cluster und Prefix mit `scope_type`/`scope_id` ab 4.2; VM-Device muss im VM-Cluster liegen; Kabel mit `a_terminations`/`b_terminations` als `{object_type, object_id}`; `serial` max. 50 Zeichen |
 | SNMP | pysnmp 7.1 (asyncio-API), RFC-MIBs | `bulk_walk_cmd` mit `lexicographicMode=False`; IF-MIB, ENTITY-MIB (Chassis = Klasse 3), LLDP-MIB (`lldpRem*`, Index `timeMark.localPort.index`), Q-BRIDGE `dot1qTpFdbPort` mit Fallback auf BRIDGE-MIB |
 | Graph: Entra ID | Microsoft Learn (Graph v1.0, 21.10.2026) | CA-Richtlinien enthalten `authenticationStrength` vollständig; Stärken unter `/policies/authenticationStrengthPolicies`; `policyMigrationState` und `includeApplications` uneinheitlich geschrieben (`preMigration`/`premigration`, `none`/`None`) → ohne Groß-/Kleinschreibung verglichen; `isPrivileged` nur in beta → Admin-Rollen der Vorlage „MFA für Administratoren“ (Vorlagen-IDs); `$expand=principal` auf Rollen-Listen; PIM-Instanzen mit `assignmentType` Assigned/Activated und `endDateTime` (null = dauerhaft); Fehlercode ohne P2-Lizenz nicht dokumentiert → jeder Fehler gilt als „PIM nicht verfügbar“ |
+| Active Directory (LDAP) | Microsoft Learn (MS-ADTS, Schema-Referenz), Samba 4.17 im Test | Funktionsebenen 0–7 und 10 (Server 2025); `gPLink` `[LDAP://…;Optionen]`, Bit 1 deaktiviert, Bit 2 erzwungen, **letzter Eintrag = Reihenfolge 1**; `gPOptions` 1 = Vererbung blockiert; `flags` 1/2/3 = Benutzer/Computer/alles deaktiviert; `versionNumber` oben Benutzer, unten Computer; `nTSecurityDescriptor` nur mit SD-Flags-Control (Besitzer + DACL), sonst fehlt es für Nicht-Admins; PSOs sind standardmäßig nur für Domänen-Admins lesbar |
+| GPO-Dateien | MS-GPREG, MS-GPSB, MS-GPAC, MS-GPSCR, MS-GPPREF, MS-GPOL, MS-GPFAS (Rev. 2024-04-23) | `Registry.pol`: `PReg`, Version 1, `[Schlüssel;Wert;Typ;Größe;Daten]` in UTF-16LE, Steuerwerte `**del.`/`**delvals` ohne Groß-/Kleinschreibung; GptTmpl.inf und scripts.ini UTF-16LE mit BOM; audit.csv UTF-8; `cpassword` in Groups, Drives, Printers, ScheduledTasks, Services, DataSources; Firewall-Regeln als REG_SZ `v2.x|Action=…|` unter `WindowsFirewall\FirewallRules`; Dateinamen ohne Groß-/Kleinschreibung |
+| ldap3 2.9.1 / smbprotocol 1.17 | Quelltext | ldap3-NTLM braucht MD4 (fehlt in OpenSSL 3) → einfache Anmeldung über TLS; ldap3 prüft Hostnamen mit einem alten Backport → eigener `SSLContext`; `auto_referrals=False`; smbclient folgt DFS-Verweisen → Low-Level-API (`Connection`/`Session`/`TreeConnect`/`Open`), Signatur Pflicht, NTLM aus pyspnego |
 | FortiOS Status | Fortinet-Ansible-Collection | `monitor/system/status` → `model_name`/`model_number`; `system/interface` mit `type`, `vlanid`, `interface` (Parent), `member`, `secondaryip`, `role` |
 
 ## Ende-zu-Ende geprüft (19.10.2026)
@@ -210,6 +216,40 @@ Das Code-Review fand zehn weitere Punkte; alle sind behoben und mit Tests in `te
 - Link und Pfad einer Richtlinie ohne Namen passten nicht zusammen.
 - `]` im Richtliniennamen brach den Link.
 - Die Berechtigungsprüfung wird jetzt aus denselben Datengruppen abgeleitet wie der Job.
+
+## Active Directory (21.10.2026)
+
+Der Agent liest das AD nur: LDAP-Suchen über TLS und Dateien aus `\\<DC>\SYSVOL`. Beides geht nur an die Domänencontroller
+aus `ad.servers`. Dafür prüft `EgressGuard.check_host` den Host, LDAP-Referrals werden nicht verfolgt und DFS-Weiterleitungen
+nicht aufgelöst. Die GPO-Dateien stammen vom DC, mit dem LDAP verbunden ist, über einen aus der GUID gebildeten Pfad.
+`gPCFileSysPath` wird nur geprüft, nie benutzt; ein Pfad auf einen fremden Server ist ein Befund.
+
+**Entscheidungen:**
+- **Einfache Anmeldung über TLS statt NTLM/Kerberos:** ldap3 braucht für NTLM MD4, das OpenSSL 3 nicht mehr hat, und
+  Kerberos bräuchte eine krb5-Umgebung im Container. Eine einfache Anmeldung über TLS erfüllt die LDAP-Signaturpflicht
+  der DCs und ist von Channel Binding nicht betroffen. Unverschlüsseltes LDAP ist nicht vorgesehen.
+- **Eigener TLS-Kontext:** ldap3 prüft den Hostnamen mit einem Backport aus Python 2, deshalb nutzt der Agent einen
+  eigenen `ssl.SSLContext` mit Hostnamenprüfung. Ab Python 3.13 verlangt der strikte Modus einen Authority Key
+  Identifier. Viele interne CAs (auch Samba) liefern ihn nicht, darum ist nur dieses Flag aus; Kette und Name werden
+  weiter geprüft.
+- **Delegationen:** Gezählt werden explizite Einträge außerhalb der Schema-Vorgabe neuer Objekte, ohne reine Leserechte
+  und ohne den Löschschutz. Schreibrechte für breite Gruppen sind nie Standard.
+- **GUIDs je nach Recht:** Dieselbe GUID kann ein Attribut und einen bestätigten Schreibvorgang bezeichnen, etwa
+  `bf9679c0…` für `member` und für Self-Membership. Darum entscheidet das Recht des Eintrags, welcher Name gilt:
+  Lesen/Schreiben → Attribut, Steuerzugriff → erweitertes Recht, Self → bestätigter Schreibvorgang. Wichtige erweiterte
+  Rechte haben feste deutsche Namen über die GUID, weil sich die Anzeigenamen zwischen Windows und Samba unterscheiden.
+- **Stabile Seiten:** Auf den Seiten stehen Daten statt Zeitspannen („Kennwort gesetzt am“, „ohne Anmeldung
+  > 90 Tage“). Ein zweiter Lauf ohne Änderung im AD erzeugt nach dem Übernehmen keinen Vorschlag; das prüft ein Test.
+- **ADMX:** Die Rückwärtssuche Registrierungswert → Richtlinie läuft über Schlüssel + Wertname, bei Listen über den
+  Schlüssel. Kategorien werden dateiübergreifend über die Namespaces aufgelöst. Ohne Angabe gilt 1 = aktiviert, 0 bzw.
+  gelöscht = deaktiviert. Der Katalog bleibt im Prozess zwischengespeichert, solange sich die Dateiliste nicht ändert.
+
+**Test mit Samba 4.17 als AD-DC** (`tests/samba_ad/`, angemeldet als normaler Domänenbenutzer):
+- Samba legt Computerkonten deaktiviert an; Befunde zählen nur aktivierte Konten, die Testdaten aktivieren sie daher.
+- Ohne Admin-Rechte sind PSOs unsichtbar. Statt einer leeren Tabelle steht der Hinweis auf das fehlende Leserecht.
+- Die Anzeigenamen erweiterter Rechte weichen von Windows ab („DS Replication Get Changes All“ statt „Replicating
+  Directory Changes All“); daher die festen Namen über die GUID.
+- Samba schreibt `MACHINE`/`USER` in Großbuchstaben. Pfade werden ohne Rücksicht auf Groß-/Kleinschreibung erkannt.
 
 ## Fließtext mit Faktenprüfung (21.10.2026)
 

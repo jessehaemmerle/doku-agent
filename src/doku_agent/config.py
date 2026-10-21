@@ -76,6 +76,8 @@ DEFAULT_PATHS = {
     "coverage": "infrastruktur/abdeckung",
     "entra": "identitaet/entra/{section}",
     "entra_ca": "identitaet/entra/conditional-access/{name}",
+    "ad": "identitaet/active-directory/{section}",
+    "ad_gpo": "identitaet/active-directory/gruppenrichtlinien/{name}",
 }
 # Zusätzliche Tags je Dokutyp (gelernte Tags aus dem Wiki kommen dazu).
 DEFAULT_TAGS = {
@@ -92,6 +94,8 @@ DEFAULT_TAGS = {
     "coverage": ["netbox"],
     "entra": ["entra"],
     "entra_ca": ["entra", "conditional-access"],
+    "ad": ["active-directory"],
+    "ad_gpo": ["active-directory", "gpo"],
 }
 
 
@@ -204,6 +208,33 @@ class EntraConfig(BaseModel):
     # Notfallkonten (UPN oder Objekt-ID): Die Prüfung meldet aktive Richtlinien, die sie nicht ausnehmen
     breakglass: list[str] = Field(default_factory=list)
     max_global_admins: int = 4  # mehr Globale Administratoren meldet die Prüfung
+
+
+class AdConfig(BaseModel):
+    """Lokales Active Directory (nur lesend): LDAP immer über TLS, GPO-Dateien aus SYSVOL per SMB."""
+    enabled: bool = False
+    domain: str = ""  # DNS-Name der Domäne, z.B. corp.example.local
+    # Domänencontroller (DNS-Name wie im Zertifikat), der Reihe nach versucht; leer = domain
+    servers: list[str] = Field(default_factory=list)
+    username: str = ""  # Lesekonto als UPN (svc-doku@corp.example.local); ein normaler Domänenbenutzer genügt
+    password: str = ""
+    ldap_port: int = 636  # LDAPS; mit starttls meist 389
+    starttls: bool = False
+    verify_tls: TlsVerify = True  # true, false oder Pfad zur CA der Domäne (PEM)
+    timeout_s: float = 15
+    sysvol: bool = True  # GPO-Einstellungen aus \\<DC>\SYSVOL lesen (SMB, Port 445, signiert)
+    smb_port: int = 445
+    # Namen der administrativen Vorlagen: Central Store (SYSVOL\<domäne>\Policies\PolicyDefinitions) oder
+    # ein eingehängtes Verzeichnis mit *.admx und Sprachordnern; Sprache mit Ersatz en-US
+    admx_dir: str = ""
+    admx_language: str = "de-DE"
+    include: list[Literal["gpo", "ous", "password_policy", "privileged", "domain", "audit"]] = Field(
+        default_factory=lambda: ["gpo", "ous", "password_policy", "privileged", "domain", "audit"])
+    # Personen in Gruppen und Befunden: Anzeigename + Anmeldename, nur Anzeigename oder nur die Anzahl
+    user_names: Literal["name_account", "name", "count"] = "name_account"
+    stale_days: int = 90  # Konten ohne Anmeldung seit so vielen Tagen gelten als verwaist
+    krbtgt_max_age_days: int = 180  # älteres krbtgt-Kennwort meldet die Prüfung
+    min_password_length: int = 12  # kürzere Mindestlänge (Domäne oder PSO) meldet die Prüfung
 
 
 class FortiGateDevice(BaseModel):
@@ -378,6 +409,7 @@ class Config(BaseModel):
     wazuh: WazuhConfig = Field(default_factory=WazuhConfig)
     intune: IntuneConfig = Field(default_factory=IntuneConfig)
     entra: EntraConfig = Field(default_factory=EntraConfig)
+    ad: AdConfig = Field(default_factory=AdConfig)
     fortigate: FortiGateConfig = Field(default_factory=FortiGateConfig)
     switches: SwitchesConfig = Field(default_factory=SwitchesConfig)
     vcenter: VCenterConfig = Field(default_factory=VCenterConfig)

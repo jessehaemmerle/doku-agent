@@ -50,6 +50,18 @@ def _entra(ctx: Context, params: dict):
     return document_entra(ctx, areas or None)
 
 
+def _ad(ctx: Context, params: dict):
+    from doku_agent.generators.ad_docs import document_ad
+    areas = [a for a in params.get("areas", "").split(",") if a]
+    try:
+        return document_ad(ctx, areas or None)
+    finally:  # DCs trennen ruhende Verbindungen ohnehin; der nächste Lauf meldet sich neu an
+        for name in ("ad", "sysvol"):
+            client = ctx.__dict__.get(name) or ctx._clients.get(name)
+            if client is not None:
+                client.close()
+
+
 def _fortigate(ctx: Context, params: dict):
     from doku_agent.generators.fortigate_docs import document_fortigate
     sections = [s for s in params.get("sections", "").split(",") if s]
@@ -106,6 +118,7 @@ JOBS = {
     "wazuh_sca": ("Wazuh: SCA-Ergebnisse", _wazuh_sca),
     "intune": ("Intune: Richtlinien, Profile, Apps, Gruppen", _intune),
     "entra": ("Entra ID: Conditional Access, Methoden, Mandant, Rollen, Prüfung", _entra),
+    "ad": ("Active Directory: GPOs, OUs, Kennwortrichtlinien, privilegierte Konten, Domäne, Prüfung", _ad),
     "fortigate": ("FortiGate: Regeln, NAT, Objekte, Netzwerk, VPN, Prüfung", _fortigate),
     "fortigate_netbox": ("FortiGate → Netbox: Interfaces, IPs, VLANs, Präfixe", _fortigate_netbox),
     "switches": ("Switches (SNMP) → Netbox: Ports und Kabel", _switches),
@@ -116,7 +129,8 @@ JOBS = {
     "wiki_lint": ("Wiki-Lint: Links, Dubletten, Tags, Aktualität", _wiki_lint),
 }
 # Jobs ohne Pflichtparameter, die über UI/CLI/Scheduler direkt gestartet werden können.
-STARTABLE = ["discovery", "wazuh_rules", "wazuh_decoders", "wazuh_config", "wazuh_sca", "intune", "entra", "fortigate",
+STARTABLE = ["discovery", "wazuh_rules", "wazuh_decoders", "wazuh_config", "wazuh_sca", "intune", "entra", "ad",
+             "fortigate",
              "fortigate_netbox", "switches", "netbox_devices", "wiki_index", "wiki_lint"]
 
 

@@ -362,6 +362,39 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
         return "Berechtigungen vorhanden" + (
             "; optional fehlt Application.Read.All (App-Namen erscheinen als ID)" if optional else "")
 
+    def ad_ldap():
+        from doku_agent.generators.ad_common import FUNCTIONAL_LEVELS, dns_name
+        d = ctx.ad.domain()
+        level = d.int("msDS-Behavior-Version")
+        return (f"{ctx.ad.server}: Domäne {dns_name(ctx.ad.base)}, Funktionsebene "
+                f"{FUNCTIONAL_LEVELS.get(level, level)}, angemeldet als {ctx.cfg.ad.username}")
+
+    def ad_rights():
+        cfg = ctx.cfg.ad
+        missing, notes = [], []
+        if not ctx.ad.domain().raw("nTSecurityDescriptor"):
+            missing.append("Berechtigungen (nTSecurityDescriptor) – Delegationen, GPO-Filterung und Teile der Prüfung")
+        if "gpo" in cfg.include or "audit" in cfg.include:
+            if not ctx.ad.gpos():
+                missing.append("Gruppenrichtlinienobjekte (CN=Policies,CN=System)")
+        if ("password_policy" in cfg.include or "audit" in cfg.include) and not ctx.ad.psos():
+            notes.append("keine feingranularen Kennwortrichtlinien lesbar (standardmäßig nur für Domänen-Admins; ggf. "
+                         "Leserecht auf CN=Password Settings Container,CN=System erteilen)")
+        if missing:
+            raise RuntimeError("nicht lesbar: " + "; ".join(missing))
+        return "Leserechte vorhanden" + (f"; Hinweis: {'; '.join(notes)}" if notes else "")
+
+    def ad_sysvol():
+        from doku_agent.generators.ad_common import dns_name
+        from doku_agent.generators.gpo_docs import GUID_RE
+        entries = ctx.sysvol.listdir(f"{dns_name(ctx.ad.base)}\\Policies")
+        if entries is None:
+            raise RuntimeError("Ordner Policies fehlt in SYSVOL")
+        gpos = [e for e in entries if GUID_RE.fullmatch(e.name)]
+        store = any(e.name.lower() == "policydefinitions" for e in entries)
+        return f"{len(gpos)} GPO-Ordner lesbar" + ("; Central Store vorhanden" if store else
+                                                    "; kein Central Store – Richtliniennamen fehlen (ad.admx_dir)")
+
     def switch(sw):
         from doku_agent.connectors.snmp import SnmpClient
         data = SnmpClient(sw.host, sw.snmp or ctx.cfg.switches.snmp, ctx.guard).collect({})
@@ -405,6 +438,11 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
         check("Entra ID (Graph)", lambda: f"{len(ctx.entra.ca_policies())} Conditional-Access-Richtlinien" + (
             " (über Graph beta – v1.0 liefert einen Serverfehler bei Microsoft)" if ctx.entra.ca_via_beta else ""))
         check("Entra-Berechtigungen", entra_permissions)
+    if ctx.cfg.ad.enabled:
+        check("Active Directory (LDAP)", ad_ldap)
+        check("AD-Leserechte", ad_rights)
+        if ctx.cfg.ad.sysvol:
+            check("Active Directory (SYSVOL)", ad_sysvol)
     if ctx.cfg.fortigate.enabled:
         for dev in ctx.cfg.fortigate.devices:
             check(f"FortiGate {dev.name}", lambda dev=dev: fortigate(dev))

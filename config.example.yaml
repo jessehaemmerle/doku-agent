@@ -39,6 +39,9 @@ wiki:
     entra: identitaet/entra/{section}                 # conditional-access, benannte-standorte, authentifizierungs-
                                                       # staerken, authentifizierungsmethoden, mandant, rollen, pruefung
     entra_ca: identitaet/entra/conditional-access/{name}   # eine Seite je Conditional-Access-Richtlinie
+    ad: identitaet/active-directory/{section}         # gruppenrichtlinien, ou-struktur, kennwortrichtlinien,
+                                                      # privilegierte-konten, domaene, pruefung
+    ad_gpo: identitaet/active-directory/gruppenrichtlinien/{name}   # eine Seite je GPO
     # Fehlende Einträge (z.B. neue Dokutypen nach einem Update) kommen automatisch aus den Standardwerten.
   tags:
     netbox_device: [netbox]
@@ -54,6 +57,8 @@ wiki:
     coverage: [netbox]
     entra: [entra]
     entra_ca: [entra, conditional-access]
+    ad: [active-directory]
+    ad_gpo: [active-directory, gpo]
   convention_sample_pages: 5
 
 netbox:
@@ -118,6 +123,27 @@ entra:
   user_names: name_upn         # name_upn = "Anzeigename (UPN)", name = nur Anzeigename, count = nur Anzahl
   breakglass: []               # Notfallkonten (UPN oder Objekt-ID), z.B. [breakglass1@firma.onmicrosoft.com]
   max_global_admins: 4         # mehr Globale Administratoren meldet die Prüfung
+
+# Lokales Active Directory (nur lesend): LDAP immer über TLS (LDAPS 636 oder StartTLS 389), GPO-Dateien aus
+# \\<DC>\SYSVOL per SMB (Port 445, signiert, NTLMv2). Ein normaler Domänenbenutzer genügt; feingranulare
+# Kennwortrichtlinien (PSOs) sind standardmäßig nur für Domänen-Admins lesbar.
+ad:
+  enabled: false
+  domain: corp.example.local
+  servers: [dc1.corp.example.local, dc2.corp.example.local]   # DNS-Namen wie im DC-Zertifikat, der Reihe nach
+  username: ${AD_USER:-}       # UPN, z.B. svc-doku@corp.example.local
+  password: ${AD_PASSWORD:-}
+  ldap_port: 636
+  starttls: false              # true: Port 389 mit StartTLS
+  verify_tls: /config/ad-ca.pem   # Stammzertifikat der Domänen-CA (PEM); true = System-CAs, false = ohne Prüfung
+  sysvol: true                 # GPO-Einstellungen aus SYSVOL lesen
+  admx_dir: ""                 # leer = Central Store in SYSVOL; sonst eingehängter Ordner mit *.admx und de-DE/ en-US/
+  admx_language: de-DE         # Sprache der Richtliniennamen, Ersatz en-US
+  include: [gpo, ous, password_policy, privileged, domain, audit]
+  user_names: name_account     # name_account = "Anzeigename (Anmeldename)", name = nur Anzeigename, count = nur Anzahl
+  stale_days: 90               # Konten ohne Anmeldung seit so vielen Tagen gelten als verwaist
+  krbtgt_max_age_days: 180
+  min_password_length: 12      # kürzere Mindestlänge (Domäne oder PSO) meldet die Prüfung
 
 fortigate:
   enabled: false
@@ -210,6 +236,7 @@ schedule:
   - {job: wazuh_sca, at: "03:30", days: [0]}   # nur montags
   # - {job: intune, at: "04:00"}
   # - {job: entra, at: "04:15"}
+  # - {job: ad, at: "04:20"}
   # - {job: fortigate, at: "04:30"}
   # - {job: fortigate_netbox, at: "04:45"}
   # - {job: switches, at: "01:00"}

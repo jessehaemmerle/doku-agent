@@ -3,8 +3,9 @@
 Lokaler KI-Agent, der IT-Dokumentation erzeugt und in **Wiki.js** pflegt – mit Fokus auf
 **Netbox** (Maschinen erkennen, eintragen und aktuell halten), **Wazuh** (eigene Regeln, Decoder, Konfiguration, SCA),
 **Intune** (Richtlinien, Profile, Apps, Entra-Gruppen), **Entra ID** (Conditional Access, Authentifizierungsmethoden,
-Mandanten-Einstellungen, privilegierte Rollen, Prüfung) und **FortiGate** (Regelwerk, NAT, Objekte, Netzwerk, VPN,
-Prüfung), aber auch für beliebige andere Themen aus Stichpunkten und Dateien. **vCenter** (Cluster, ESXi-Hosts, VMs),
+Mandanten-Einstellungen, privilegierte Rollen, Prüfung), das lokale **Active Directory** (Gruppenrichtlinien mit allen
+Einstellungen, OU-Struktur und Delegationen, Kennwortrichtlinien, privilegierte Konten, Domäne, Prüfung) und
+**FortiGate** (Regelwerk, NAT, Objekte, Netzwerk, VPN, Prüfung), aber auch für beliebige andere Themen aus Stichpunkten und Dateien. **vCenter** (Cluster, ESXi-Hosts, VMs),
 **Switches** (SNMP/LLDP mit Verkabelung) und die **FortiGate** selbst trägt er in Netbox ein; ein **Abdeckungsbericht**
 zeigt, wo Wazuh, Intune oder Netbox fehlen. Dazu kommen **Fragen ans Wiki** mit Quellenangabe und ein **Wiki-Lint**,
 der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekturen vorschlägt.
@@ -31,6 +32,7 @@ der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekt
                      ├──▶ FortiGate    (REST-API, nur lesend, optional)
                      ├──▶ vCenter 7/8  (Automation-API + VI/JSON, nur lesend, optional)
                      ├──▶ Switches     (SNMP v2c/v3, nur lesend, optional)
+                     ├──▶ Active Directory (LDAPS + SYSVOL per SMB, nur lesend, optional)
                      └──▶ Microsoft Graph (Intune, Entra ID, nur lesend, optional)
 ```
 
@@ -53,6 +55,9 @@ der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekt
 | **Entra ID: Conditional Access** | Richtlinien, benannte Standorte, Authentifizierungsstärken | Übersicht aller Richtlinien und je Richtlinie eine Seite (Zuweisungen, Bedingungen, Steuerung, Erklärung durch das LLM); Standorte und Stärken mit „Verwendet in“ |
 | **Entra ID: Mandant und Rollen** | Authentifizierungsmethoden, Sicherheitsstandards, Benutzer-/Gast-/Zustimmungs-Einstellungen, mandantenübergreifender Zugriff, Rollen inkl. PIM | Je Bereich eine Seite; Benutzer als „Anzeigename (UPN)“ |
 | **Entra ID: Prüfung** | Alles oben zusammen | Nicht durchgesetzte Richtlinien, fehlender Grundschutz (MFA für alle und Admins, Legacy-Authentifizierung), Notfallkonten nicht ausgenommen, Verweise auf gelöschte Objekte, dauerhafte Admin-Rollen, Gäste in Admin-Rollen, riskante Mandanten-Einstellungen, SMS/Anruf aktiv |
+| **AD: Gruppenrichtlinien** | GPOs aus dem AD, ihre Dateien aus SYSVOL, Namen aus dem Central Store | Je GPO eine Seite: Beschreibung durch das LLM, Status, Verknüpfungen mit Reihenfolge, WMI-Filter, Sicherheitsfilterung und Bearbeitungsrechte, dazu alle Einstellungen – administrative Vorlagen mit Richtliniennamen, Sicherheitseinstellungen (Kontorichtlinien, Benutzerrechte, Sicherheitsoptionen, eingeschränkte Gruppen, Dienste), erweiterte Überwachung, Firewall-Regeln, Skripte, Preferences. Kennwörter aus Preferences erscheinen nie |
+| **AD: Struktur und Richtlinien** | OUs, Domäne, PSOs, privilegierte Gruppen, DCs, Standorte, Vertrauensstellungen | Seiten zu OU-Struktur (verknüpfte GPOs, blockierte Vererbung, Löschschutz, **Delegationen** in Worten), Kennwort- und Sperrrichtlinien inkl. feingranularer Richtlinien und Kerberos, privilegierten Gruppen (auch verschachtelt), Dienstkonten und Kerberos-Delegierung, Domäne und Gesamtstruktur |
+| **AD: Prüfung** | Alles oben zusammen | GPOs mit gespeicherten Kennwörtern, unwirksame oder beschädigte GPOs, schwache Kennwortrichtlinien, Admins mit „Kennwort läuft nie ab“, Kerberoasting und AS-REP-Roasting, uneingeschränkte Delegierung, altes krbtgt-Kennwort, verwaiste Konten, DCSync-Rechte, gefährliche Rechte auf Domäne und AdminSDHolder, Papierkorb, MachineAccountQuota, Vertrauensstellungen ohne SID-Filterung |
 | **Entra-Gruppen** | Alle Gruppen, die in Intune-Zuweisungen vorkommen | Übersichtsseite mit Art, dynamischer Regel, Mitgliederzahlen (Benutzer, Geräte, Untergruppen) und allen Zuweisungen je Gruppe |
 | **FortiGate** | Policies, Adressen/Dienste, VIPs/IP-Pools, Interfaces/Zonen/Routen, IPsec | Je Firewall (und VDOM) sechs Seiten: Regeln mit Erklärung jeder Regel durch das LLM, NAT, Objekte mit Verwendung, Netzwerk, VPN und eine **Prüfung** (verdeckte Regeln, any-any, ohne Logging, Internet ohne Sicherheitsprofil, unbenutzte Objekte). PSKs und Passwörter werden nie übernommen |
 | **Freie Doku** | Stichpunkte und Dateien (TXT, Config, Log, CSV/JSON/XML/YAML, PDF, DOCX) | Der Agent sucht eine passende bestehende Seite (auch inhaltlich über den Suchindex) und ergänzt sie, oder legt eine neue im passenden Bereich an |
@@ -141,6 +146,27 @@ weisen darauf hin.
 Bleibt der Fehler auch über beta bestehen, mit Graph Explorer oder
 `Get-MgBetaIdentityConditionalAccessPolicy` gegenprüfen und die request-id aus der Meldung an den Microsoft-Support
 geben.
+
+**Active Directory (optional)** – ein **normaler Domänenbenutzer** als Lesekonto genügt (z.B. `svc-doku`, Kennwort
+läuft nicht ab, Mitglied nur von „Domänen-Benutzer“). Zugang als `AD_USER` (UPN, `svc-doku@corp.example.local`) und
+`AD_PASSWORD` in `.env`, dann unter `ad.*` Domäne und Domänencontroller eintragen und `ad.enabled: true` setzen.
+
+- **LDAP immer verschlüsselt:** LDAPS auf Port 636 oder StartTLS auf 389 (`starttls: true`), einfache Anmeldung über
+  TLS. Das DC-Zertifikat wird geprüft: Stammzertifikat der Domänen-CA als PEM unter `verify_tls` angeben und die DCs
+  mit dem DNS-Namen aus dem Zertifikat eintragen. Haben die DCs noch kein Zertifikat, zuerst eins ausstellen (AD CS,
+  Vorlage „Domänencontrollerauthentifizierung“) – unverschlüsseltes LDAP unterstützt der Agent nicht.
+- **SYSVOL per SMB** (Port 445) mit demselben Konto, signiert, Anmeldung per NTLMv2. Gelesen wird nur die Freigabe
+  `SYSVOL` des Domänencontrollers, mit dem LDAP verbunden ist; DFS-Weiterleitungen zu anderen Servern folgt der Agent
+  nicht. Ohne SMB (`sysvol: false`) fehlen nur die Einstellungen der GPOs.
+- **Feingranulare Kennwortrichtlinien** darf standardmäßig nur „Domänen-Admins“ lesen. Für die Kennwortseite dem
+  Lesekonto Leserechte auf `CN=Password Settings Container,CN=System,<Domäne>` geben (*AD-Benutzer und -Computer ›
+  Erweiterte Features › System › Password Settings Container › Eigenschaften › Sicherheit*). Ohne das Recht steht
+  dort ein Hinweis.
+- **Richtliniennamen** kommen aus dem Central Store (`SYSVOL\<domäne>\Policies\PolicyDefinitions`) in der Sprache
+  `admx_language`, ersatzweise `en-US`. Ohne Central Store einen Ordner mit den ADMX/ADML-Dateien einhängen
+  (`admx_dir`), sonst erscheinen die Registrierungswerte ohne Namen.
+
+`doku-agent check` prüft Anmeldung, Leserechte (Berechtigungen, GPOs, PSOs) und SYSVOL.
 
 **FortiGate (optional)** – *System › Administratoren › REST-API-Admin* anlegen, mit einem Admin-Profil, das alles
 nur lesen darf, und den Agent-Host als *Trusted Host* eintragen. Das Token als `FORTIGATE_TOKEN` in `.env`, die
@@ -425,6 +451,58 @@ Vorschläge. Ist ein Bereich nicht lesbar (fehlende Berechtigung), werden die ü
 entfällt, weil sie unvollständig wäre. Mit `user_names: count` erscheinen keine Personennamen im Wiki, nur Anzahlen
 („2 Benutzer“, „Notfallkonto 1“).
 
+## Active Directory
+
+Der Job `ad` liest per LDAP (nur Suchen) und SYSVOL (nur Lesen) und schlägt diese Seiten unter
+`identitaet/active-directory/` vor:
+
+| Seite | Inhalt |
+|---|---|
+| `gruppenrichtlinien` | alle GPOs mit Status, Verknüpfungen, WMI-Filter, Änderungsdatum und Erweiterungen, verlinkt auf ihre Seite; Verknüpfungen auf gelöschte GPOs |
+| `gruppenrichtlinien/<name>` | je GPO: Beschreibung durch das LLM, Grunddaten (Status, Version in AD und SYSVOL, WMI-Filter mit Abfrage), Verknüpfungen (Domäne, OUs, Standorte; Reihenfolge, erzwungen, deaktiviert, blockierte Vererbung am Ziel), Sicherheitsfilterung, Bearbeitungsrechte, Besitzer, Computer- und Benutzerkonfiguration |
+| `ou-struktur` | OU-Baum mit verknüpften GPOs in Reihenfolge, Vererbung, Löschschutz und Anzahl der Benutzer/Computer; Delegationen („Helpdesk – Kennwort zurücksetzen – untergeordnete user-Objekte“); Standardcontainer für neue Objekte |
+| `kennwortrichtlinien` | wirksame Domänenrichtlinie, feingranulare Kennwortrichtlinien mit Rangfolge und Geltungsbereich, Kerberos-Richtlinie aus der GPO an der Domäne |
+| `privilegierte-konten` | Organisations-, Domänen- und Schema-Admins, Administratoren, Konten-/Server-/Sicherungs-/Druck-Operatoren, Schlüsseladministratoren, Richtlinien-Ersteller-Besitzer, DnsAdmins – mit allen Mitgliedern auch über verschachtelte Gruppen und die primäre Gruppe; Dienstkonten (SPN, gMSA), Kerberos-Delegierung, krbtgt, Administrator, Gast |
+| `domaene` | Funktionsebenen, Papierkorb, Tombstone, MachineAccountQuota, LAPS, Domänencontroller mit Standort, GC, RODC und Betriebsmasterrollen, Standorte, Subnetze, Standortverknüpfungen, Vertrauensstellungen, Betriebssysteme der Computer |
+| `pruefung` | Befunde (siehe unten) |
+
+**Einstellungen einer GPO:**
+- **Administrative Vorlagen** aus `Registry.pol` mit Richtlinienname, Status (aktiviert/deaktiviert), Optionen und
+  Kategorie aus dem Central Store. Werte ohne Vorlage erscheinen roh mit Schlüssel, Wert und Daten, Windows-Firewall-
+  Regeln als eigene Tabelle.
+- **Sicherheitseinstellungen** aus `GptTmpl.inf`: Konto- und Kerberos-Richtlinien, Überwachungsrichtlinie, Zuweisen von
+  Benutzerrechten (mit aufgelösten Namen), Sicherheitsoptionen, eingeschränkte Gruppen, Systemdienste,
+  Ereignisprotokoll, Berechtigungen auf Registrierung und Dateisystem.
+- **Erweiterte Überwachung** (`audit.csv`), **Skripte** (Start/Herunterfahren, An-/Abmeldung, auch PowerShell) und
+  **Preferences** (lokale Benutzer und Gruppen, Laufwerke, Registrierung, Aufgaben, Dienste, Dateien, Drucker …) mit
+  Aktion und Zielgruppenadressierung. Andere Erweiterungen (Softwareinstallation, Ordnerumleitung …) werden als
+  Dateien genannt, aber nicht ausgewertet.
+
+**Prüfung:**
+- **Gruppenrichtlinien:** gespeicherte Kennwörter in Preferences (MS14-025), nicht verknüpft oder alle Verknüpfungen
+  aus, verknüpft aber komplett deaktiviert, leer, Ordner fehlt in SYSVOL, Version in AD und SYSVOL verschieden,
+  Dateipfad zeigt auf fremden Server, WMI-Filter fehlt, Computer ohne Leserecht (MS16-072), bearbeitbar für alle,
+  Verknüpfungen auf gelöschte GPOs.
+- **Kennwortrichtlinien:** Mindestlänge unter `min_password_length`, ohne Komplexität, ohne Sperre, umkehrbare
+  Verschlüsselung, kurze Chronik; PSOs, die für niemanden gelten.
+- **Privilegierte Konten:** „Kennwort läuft nie ab“, SPN an Admin-Konten, nicht in Protected Users und nicht „nicht
+  delegierbar“, inaktive Admins, Kennwort älter als ein Jahr, `adminCount=1` ohne privilegierte Gruppe, krbtgt
+  älter als `krbtgt_max_age_days`, aktives Gastkonto.
+- **Kerberos:** Benutzerkonten mit SPN (Kerberoasting), ohne Vorauthentifizierung (AS-REP-Roasting), uneingeschränkte
+  Delegierung außerhalb der DCs, Protokollübergang, nur DES.
+- **Konten:** Computer und Benutzer ohne Lebenszeichen seit `stale_days`, „Kennwort nicht erforderlich“, Computer im
+  Standardcontainer, Computer ohne LAPS-Kennwort.
+- **Berechtigungen:** DCSync-Rechte außerhalb der DCs, Vollzugriff, Berechtigungen ändern oder Besitz übernehmen auf
+  Domäne und AdminSDHolder für Nicht-Admins, Schreibrechte für alle auf OUs.
+- **Domäne:** Papierkorb aus, MachineAccountQuota > 0, Funktionsebene unter 2016, DCs ohne Herstellersupport, externe
+  Vertrauensstellungen ohne SID-Filterung, TGT-Delegierung über Vertrauensstellungen, kein LAPS im Schema.
+
+Damit unveränderte Daten keine Schein-Änderungen erzeugen, stehen auf den Seiten Daten statt Zeitspannen
+(„Kennwort gesetzt am …“, „ohne Anmeldung > 90 Tage“). `lastLogonTimestamp` wird im AD nur alle 9–14 Tage
+repliziert; „inaktiv“ ist daher eine Näherung (bei Computern zählt auch der automatische Kennwortwechsel). Mit
+`user_names: count` erscheinen keine Personennamen im Wiki, nur Anzahlen; Gruppen, Computer und Dienstkonten bleiben
+benannt.
+
 ## Firewall-Dokumentation (FortiGate)
 
 Je Firewall und VDOM entstehen sechs Seiten unter `netzwerk/firewall/<name>/`:
@@ -562,13 +640,17 @@ deshalb bei der Freigabe lesen. Die Tabellen darunter sind immer exakt.
 
 - **Egress-Allowlist:** Jeder HTTP-Client des Agents prüft vor dem Senden, ob der Ziel-Host konfiguriert ist (Wiki,
   Ollama, Netbox, Wazuh, FortiGates, vCenter, bei Intune `login.microsoftonline.com` und `graph.microsoft.com`). Weiterleitungen werden
-  nicht verfolgt, Proxy-Variablen werden standardmäßig ignoriert. SNMP geht nur an die Switches aus `switches.devices`.
+  nicht verfolgt, Proxy-Variablen werden standardmäßig ignoriert. SNMP geht nur an die Switches aus `switches.devices`,
+  LDAP und SMB nur an die Domänencontroller aus `ad.servers` (keine LDAP-Referrals, keine DFS-Weiterleitungen).
 - **Ollama ohne Internet:** Der Ollama-Container hängt nur am internen Netz `llm`. Zusätzlich ist
   `OLLAMA_NO_CLOUD=1` gesetzt (keine Cloud-Modelle, keine Websuche). Nur der einmalige `ollama-pull` hat Internet.
 - **Geheimnisse:** Tokens nur in `.env` (nicht eingecheckt). In Wazuh-Konfigurationen, Intune-Einstellungen und
   FortiGate-Objekten werden Passwörter, Keys, PSKs, Tokens und Webhooks vor dem Prompt und vor dem Wiki maskiert.
 - **Entra ID:** Benutzernamen und UPNs (z.B. ausgenommene Notfallkonten) stehen in den Seiten, wenn
   `entra.user_names` nicht `count` ist. Sie gehen nur an das lokale Sprachmodell und ins eigene Wiki.
+- **Active Directory:** Das Lesekonto braucht keine Administratorrechte; der Agent schreibt nie ins AD. Kennwörter aus
+  GPO-Preferences (`cpassword`) werden erkannt, aber weder ans Sprachmodell noch ins Wiki gegeben. Namen von Personen
+  (Mitglieder privilegierter Gruppen, Befunde) lassen sich mit `ad.user_names: count` ausblenden.
 - **Embeddings und Fragen** laufen über dasselbe lokale Ollama; Index und Fragen liegen in der lokalen SQLite-Datenbank.
 - **Oberfläche:** Basic-Auth (Pflicht), CSRF-Schutz, strikte Content-Security-Policy, keine externen Skripte oder Fonts,
   standardmäßig nur auf `127.0.0.1` gebunden. Der Agent-Container läuft ohne Root, mit read-only Dateisystem und
@@ -596,6 +678,9 @@ DOKU_IT_SNMP_HOST=127.0.0.1 DOKU_IT_SNMP_PORT=1161 \
 .venv/bin/pytest tests/test_integration_*.py
 ```
 
+Der AD-Test (`DOKU_IT_AD_SERVER`, `DOKU_IT_AD_PORT`, `DOKU_IT_AD_SMB_PORT`, `DOKU_IT_AD_CA`) läuft gegen einen
+Samba-AD-DC mit den Testdaten aus `tests/samba_ad/` (Aufbau siehe `tests/samba_ad/README.md`).
+
 Der Switch-Test braucht einen SNMP-Simulator (z.B. `snmpsim`, Community `public`) mit den Daten des Switches
 `sw-core01`, die im Kopf von `tests/test_integration_switches.py` beschrieben sind, und zusätzlich Netbox.
 
@@ -617,6 +702,12 @@ Aufbau und Entscheidungen: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
   werden nicht dokumentiert. Der Grundschutz-Check bewertet nur Benutzer, Rollen und „alle Ressourcen“, keine
   einzelnen Apps. PIM-Daten gibt es nur mit Entra ID P2. Mangels Testmandant ist Entra nur gegen einen Graph-Fake nach
   dem dokumentierten Schema getestet.
+- Active Directory: eine Domäne je Agent; GPOs aus anderen Domänen der Gesamtstruktur erscheinen nur als Verknüpfung.
+  Kein Richtlinienergebnissatz (RSoP), also keine Berechnung, was auf einem bestimmten Computer gilt. Software-
+  installation, Ordnerumleitung, WLAN-/Kabel-Richtlinien, IPsec, AppLocker und WDAC werden nicht ausgewertet;
+  Sicherheitsoptionen nur für eine Auswahl häufiger Werte mit Namen. SYSVOL braucht NTLM (Kerberos wird nicht
+  unterstützt). Getestet gegen Samba 4.17 als AD-DC und Fakes nach der Protokolldokumentation, nicht gegen einen
+  Windows-DC; Standardrechte und Anzeigenamen können bei Windows abweichen.
 - Fragen ans Wiki kennen nur Wiki-Inhalte, keine Live-Daten aus Netbox oder Wazuh.
 - Wazuh-Alarm-Auswertungen aus dem Indexer sind nicht enthalten (bewusst ausgeklammert).
 - Bilder bzw. Screenshots in Aufträgen werden nicht ausgewertet (Vision-Modell auf CPU zu langsam).

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "doku-agent"
 version = "0.1.0"
-description = "Lokaler KI-Dokumentations-Agent für Wiki.js, Netbox, Wazuh und Intune"
+description = "Lokaler KI-Dokumentations-Agent für Wiki.js, Netbox, Wazuh, Intune, Entra ID und Active Directory"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
@@ -22,6 +22,8 @@ dependencies = [
     "tzdata>=2024.1",
     "numpy>=1.26,<3",
     "pysnmp>=7.1,<8",
+    "ldap3>=2.9.1,<3",
+    "smbprotocol>=1.17,<2",
 ]
 
 [project.optional-dependencies]
