@@ -72,9 +72,9 @@ class EntraClient(GraphClient):
             return self.missing_permissions(areas)
 
     # --- Conditional Access ---------------------------------------------------
-    # Graph v1.0 scheitert bei manchen Mandanten mit HTTP 500 an Conditional Access (berichtet für Richtlinien mit
-    # Funktionen, die es nur in beta gibt). Dann wird für eine Stunde über beta gelesen; das Schema dort ist eine
-    # Obermenge, die Auswertung bleibt gleich.
+    # Antwortet Graph v1.0 bei Conditional Access dauerhaft mit 5xx, wird für eine Stunde über beta gelesen. Eine
+    # mögliche (nicht dokumentierte) Ursache sind Richtlinien mit Vorschau-Funktionen, die nur beta abbildet; das
+    # Schema dort ist eine Obermenge, die Auswertung bleibt gleich.
 
     @property
     def ca_via_beta(self) -> bool:

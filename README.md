@@ -129,8 +129,8 @@ Prüfung sie kennt. `doku-agent check` zeigt in „Entra-Berechtigungen“, was 
 **HTTP 500 von Graph:** Das ist ein Fehler auf Microsofts Seite, keine fehlende Berechtigung; die wäre ein 403.
 Der Agent wiederholt solche Anfragen mit kurzer Pause.
 
-Für Conditional Access ist berichtet, dass v1.0 an Richtlinien mit Vorschau-Funktionen scheitert, beta aber nicht.
-Antwortet v1.0 dort weiter mit 5xx, liest der Agent eine Stunde lang über beta. Das Job-Protokoll und `check`
+Antwortet v1.0 bei Conditional Access dauerhaft mit 5xx, liest der Agent eine Stunde lang über beta. Eine mögliche,
+aber nicht offiziell dokumentierte Ursache sind Richtlinien mit Vorschau-Funktionen, die nur beta abbildet. Das Job-Protokoll und `check`
 weisen darauf hin.
 
 Bleibt der Fehler auch über beta bestehen, mit Graph Explorer oder
