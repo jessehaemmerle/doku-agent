@@ -162,6 +162,7 @@ def test_pruef_und_uebersichtsseiten_haben_text_ueber_den_tabellen(ctx, fake_wik
     # Die Bewertung bekommt die Befunde als Fakten
     prompt = next(u for kind, u in ctx.llm.calls if "automatischen Prüfung von Entra ID" in u)
     assert "Richtlinien nicht durchgesetzt: 1 Befunde" in prompt and "Länder blockieren" in prompt
+    assert "Befunde gesamt: " in prompt  # Summe vorgegeben, damit das Modell nicht selbst rechnet
 
 
 def test_fortigate_pruefung_und_abdeckung_haben_bewertung(ctx, fake_wiki):

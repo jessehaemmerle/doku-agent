@@ -239,7 +239,10 @@ def assessment(ctx: Context, key: str, *, expert: str, subject: str,
                 f"Die Prüfung von {subject} ergab {total} Befunde: "
                 + ", ".join(f"{title} ({len(rows)})" for title, _, rows in sections if rows)
                 + ". Die Einzelheiten stehen in den Tabellen unten.")
-    facts = (context.strip() + "\n" if context else "") + findings_facts(sections)
+    affected = sum(1 for _, _, rows in sections if rows)
+    # Summen gleich mitgeben: sonst rechnet das Modell selbst (und verrechnet sich)
+    facts = (context.strip() + "\n" if context else "") + \
+        f"Befunde gesamt: {total}, in {affected} von {len(sections)} Prüfungen\n" + findings_facts(sections)
     return narrate(
         ctx, key, expert=expert, fallback=fallback, facts=facts,
         task=f"Bewerte das Ergebnis dieser automatischen Prüfung von {subject} für das IT-Team: Wie ist der "
