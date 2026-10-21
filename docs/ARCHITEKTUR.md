@@ -26,6 +26,7 @@
 | Switches (20.10.2026) | SNMP, herstellerunabhängig; Kabel aus LLDP + MAC-Tabelle, Endgeräte nur bei genau einer MAC am Port | `connectors/snmp.py` (pysnmp, Allowlist), `switches.py`, ein Vorschlag je Switch |
 | FortiGate → Netbox (20.10.2026) | Gerät + Interfaces, IPs, VLANs, Präfixe, alles mit Freigabe | `fortigate_netbox.py`, Job `fortigate_netbox` |
 | Abdeckung (20.10.2026) | Wazuh auf Servern und Clients, Intune auf Clients, Netbox für alles, Funkstille 30 Tage | `coverage.py`, nach jeder Discovery, Seite ohne Datum |
+| Entra ID (21.10.2026) | Conditional Access (+ Standorte, Stärken), Authentifizierungsmethoden, Mandanten-Einstellungen, Rollen inkl. PIM; Übersicht + Seite je CA-Richtlinie mit LLM-Erklärung; Benutzer als Name + UPN; Prüfseite | `connectors/graph.py` (gemeinsame Basis für Intune und Entra), `connectors/entra.py`, `generators/entra_docs.py`, Job `entra` |
 | Firewall im Steckbrief / Prüfung (20.10.2026) | Regeln über Host-, Bereichs-, VIP-Objekte und Netze bis /24; Hygiene-Check als eigene Seite je Firewall | `fortigate_docs.machine_rules`, `fortigate_docs.audit` (Intervall-Mengen für Adressen und Dienste) |
 
 ## Module
@@ -52,8 +53,10 @@ src/doku_agent/
   embeddings.py    Ollama /api/embed
   semantic.py      Suchindex (Abschnitte je Überschrift), Suche, Fragen mit Quellen
   lint.py          Wiki-Lint: tote Links, Dubletten, ohne Tags, veraltete Seiten (Neuberechnung über stable_id), Korrekturen
-  connectors/      netbox.py, wazuh.py, intune.py, fortigate.py, vcenter.py, snmp.py
-  generators/      wazuh_docs, intune_docs, netbox_docs, fortigate_docs, freeform, common (Maskierung, Cache, Stil)
+  connectors/      netbox.py, wazuh.py, graph.py (Graph-Basis: Token, 403-Meldungen), intune.py, entra.py,
+                   fortigate.py, vcenter.py, snmp.py
+  generators/      wazuh_docs, intune_docs, entra_docs, netbox_docs, fortigate_docs, freeform,
+                   common (Maskierung, Cache, Stil)
   jobs.py          Job-Registry, Job-Log, Worker-Thread
   scheduler.py     Tages-Zeitplan
   web/             FastAPI-App, Templates, CSS
@@ -79,6 +82,7 @@ Datenfluss eines Laufs: **Quelle → Generator → `PageDraft` → `propose_page
 | vSphere VI/JSON | Referenz ab 8.0 U1 | `ServiceInstance/ServiceInstance/content` → `sessionManager`, `SessionManager/{id}/Login`; `HostSystem/{id}/hardware` → `systemInfo` (vendor, model, serialNumber, otherIdentifyingInfo) |
 | Netbox Virtualisierung/IPAM/Kabel | Serializer und Validierung @ 4.7.2 (Image) | `virtual-disks.size` in MB, Disk-Summe der VM wird berechnet; Cluster und Prefix mit `scope_type`/`scope_id` ab 4.2; VM-Device muss im VM-Cluster liegen; Kabel mit `a_terminations`/`b_terminations` als `{object_type, object_id}`; `serial` max. 50 Zeichen |
 | SNMP | pysnmp 7.1 (asyncio-API), RFC-MIBs | `bulk_walk_cmd` mit `lexicographicMode=False`; IF-MIB, ENTITY-MIB (Chassis = Klasse 3), LLDP-MIB (`lldpRem*`, Index `timeMark.localPort.index`), Q-BRIDGE `dot1qTpFdbPort` mit Fallback auf BRIDGE-MIB |
+| Graph: Entra ID | Microsoft Learn (Graph v1.0, 21.10.2026) | CA-Richtlinien enthalten `authenticationStrength` vollständig; Stärken unter `/policies/authenticationStrengthPolicies`; `policyMigrationState` und `includeApplications` uneinheitlich geschrieben (`preMigration`/`premigration`, `none`/`None`) → ohne Groß-/Kleinschreibung verglichen; `isPrivileged` nur in beta → Admin-Rollen der Vorlage „MFA für Administratoren“ (Vorlagen-IDs); `$expand=principal` auf Rollen-Listen; PIM-Instanzen mit `assignmentType` Assigned/Activated und `endDateTime` (null = dauerhaft); Fehlercode ohne P2-Lizenz nicht dokumentiert → jeder Fehler gilt als „PIM nicht verfügbar“ |
 | FortiOS Status | Fortinet-Ansible-Collection | `monitor/system/status` → `model_name`/`model_number`; `system/interface` mit `type`, `vlanid`, `interface` (Parent), `member`, `secondaryip`, `role` |
 
 ## Ende-zu-Ende geprüft (19.10.2026)
@@ -177,3 +181,31 @@ ohnehin Mindestversion ist.
 - Wazuh-Alarmberichte aus dem Indexer.
 - Wiki.js 3.x und Visual-Editor-Seiten.
 - Bildauswertung.
+
+## Entra ID (21.10.2026)
+
+Graph-Zugriff liegt jetzt in `connectors/graph.py`. Intune und Entra teilen sich Anmeldung, Paging und Drosselung
+sowie die verständliche 403-Meldung mit der fehlenden Berechtigung. Nach einem 403 holt der Client beim nächsten
+Aufruf ein neues Token, höchstens einmal pro Minute; so greift eine frisch erteilte Zustimmung ohne Neustart.
+
+Wiki-Pfade und Tags aus der `config.yaml` werden mit den Standardwerten zusammengeführt. Dokutypen neuer Versionen
+landen damit auch bei bestehenden Konfigurationen am vorgesehenen Ort und nicht im Wurzelverzeichnis des Wikis.
+
+Getestet ist Entra nur gegen einen Graph-Fake nach dem verifizierten Schema; ein Testmandant stand nicht zur Verfügung.
+Die Tests haben zwei Fehler gefunden, beide sind behoben:
+- Eine Blockier-Regel nur für Legacy-Clients zählte als MFA-Schutz.
+- Im Modus `count` erschienen Prüfer und Notfallkonten mit Namen.
+
+Das Code-Review fand zehn weitere Punkte; alle sind behoben und mit Tests in `tests/test_entra.py` abgesichert:
+- Die CA-Übersicht wäre nach der ersten Freigabe abgestürzt (`pages` ist eine Property).
+- Ein nicht lesbares Notfallkonto, etwa ohne `User.Read.All`, galt als „nicht gefunden“, und seine Ausnahmen blieben
+  ungeprüft.
+- Die Legacy-Einstellung „Vertrauenswürdige MFA-IPs“ erschien als gelöschter Standort.
+- Vorübergehende Graph-Störungen (429, 5xx) schalteten still auf „ohne PIM“ um oder erzeugten abweichende Seiten. Jetzt
+  bricht der Bereich ab.
+- Notfallkonten erschienen bei `user_names: name` mit UPN.
+- Abgewählte Bereiche wurden vom Wiki-Lint weiter aktualisiert.
+- Link und Pfad einer Richtlinie ohne Namen passten nicht zusammen.
+- `]` im Richtliniennamen brach den Link.
+- Die Berechtigungsprüfung wird jetzt aus denselben Datengruppen abgeleitet wie der Job.
+

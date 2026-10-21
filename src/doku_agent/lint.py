@@ -64,6 +64,21 @@ def refresh(ctx: Context, stable_id: str) -> int | None:
                 raise SourceGone("Richtlinie in Intune gelöscht") from exc
             raise
         return intune_docs.document_policy(ctx, category, policy)
+    if source == "entra" and ctx.cfg.entra.enabled:
+        from doku_agent.generators import entra_docs
+        include = ctx.cfg.entra.include
+        if (parts[1] == "ca" and "conditional_access" not in include) \
+                or (parts[1] in entra_docs.SLUG_AREA and entra_docs.SLUG_AREA[parts[1]] not in include):
+            raise Unsupported(stable_id)  # Bereich nicht mehr ausgewählt: nichts zu prüfen
+        if parts[1] == "ca":
+            try:
+                return entra_docs.document_ca_policy(ctx, ":".join(parts[2:]))
+            except Exception as exc:
+                if _not_found(exc):
+                    raise SourceGone("Richtlinie in Entra ID gelöscht") from exc
+                raise
+        if parts[1] in entra_docs.SLUG_AREA:
+            return entra_docs.document_section(ctx, parts[1])
     if source == "wazuh" and ctx.cfg.wazuh.enabled:
         from doku_agent.generators import wazuh_docs
         kind, rest = parts[1], ":".join(parts[2:])
@@ -363,8 +378,7 @@ def _fix_text(d: dict) -> str:
     return "–"
 
 
-def _link(path: str, title: str) -> str:
-    return f"[{(title or path).replace(']', '')}](/{path})"
+_link = markdown.link
 
 
 def propose_report(ctx: Context, report: dict) -> int | None:

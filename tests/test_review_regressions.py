@@ -279,6 +279,7 @@ def test_lint_sca_offline_agent_is_not_reported_as_gone(ctx):
 
 
 def test_group_cache_expires(ctx, monkeypatch):
+    from doku_agent.connectors import graph as graph_mod
     from doku_agent.connectors import intune as intune_mod
     from tests.test_intune_groups import FakeGraph, GROUPS, G_STATIC
 
@@ -286,11 +287,11 @@ def test_group_cache_expires(ctx, monkeypatch):
     client = intune_mod.IntuneClient(ctx.cfg.intune, EgressGuard({"graph.microsoft.com", "login.microsoftonline.com"}),
                                      transport=httpx.MockTransport(fake.handler))
     now = [1000.0]
-    monkeypatch.setattr(intune_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(graph_mod.time, "monotonic", lambda: now[0])
     assert client.group_name(G_STATIC) == "Pilot-Benutzer"
     monkeypatch.setitem(GROUPS, G_STATIC, {**GROUPS[G_STATIC], "displayName": "Pilot-Benutzer (neu)"})
     assert client.group_name(G_STATIC) == "Pilot-Benutzer"
-    now[0] += intune_mod.GROUP_CACHE_SECONDS + 1
+    now[0] += graph_mod.GROUP_CACHE_SECONDS + 1
     assert client.group_name(G_STATIC) == "Pilot-Benutzer (neu)"
 
 

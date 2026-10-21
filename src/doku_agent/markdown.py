@@ -163,6 +163,11 @@ def unified_diff(old: str, new: str, name: str = "seite.md") -> str:
     ))
 
 
+def link(path: str, title: str) -> str:
+    """Interner Wiki-Link; ']' im Text würde den Link brechen."""
+    return f"[{(title or path).replace(']', '')}](/{path})"
+
+
 def table(headers: list[str], rows: list[list]) -> str:
     """Markdown-Tabelle; Pipes und Zeilenumbrüche in Zellen werden entschärft."""
     def cell(v) -> str:

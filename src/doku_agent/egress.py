@@ -30,7 +30,7 @@ def allowed_hosts(cfg: Config) -> set[str]:
         hosts.add(_host(cfg.netbox.url))
     if cfg.wazuh.enabled:
         hosts.add(_host(cfg.wazuh.url))
-    if cfg.intune.enabled:
+    if cfg.intune.enabled or cfg.entra.enabled:
         hosts.update(GRAPH_HOSTS)
     if cfg.fortigate.enabled:
         hosts.update(_host(d.url) for d in cfg.fortigate.devices)

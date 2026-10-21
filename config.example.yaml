@@ -36,6 +36,10 @@ wiki:
     fortigate: netzwerk/firewall/{device}/{section}   # {section}: regeln, nat, objekte, netzwerk, vpn; optional {vdom}
     wiki_lint: wartung/wiki-lint                      # Bericht des Wiki-Lint
     coverage: infrastruktur/abdeckung                 # Abdeckungsbericht (nach jeder Discovery)
+    entra: identitaet/entra/{section}                 # conditional-access, benannte-standorte, authentifizierungs-
+                                                      # staerken, authentifizierungsmethoden, mandant, rollen, pruefung
+    entra_ca: identitaet/entra/conditional-access/{name}   # eine Seite je Conditional-Access-Richtlinie
+    # Fehlende Einträge (z.B. neue Dokutypen nach einem Update) kommen automatisch aus den Standardwerten.
   tags:
     netbox_device: [netbox]
     wazuh_rules: [wazuh]
@@ -48,6 +52,8 @@ wiki:
     fortigate: [firewall, fortigate]
     wiki_lint: []
     coverage: [netbox]
+    entra: [entra]
+    entra_ca: [entra, conditional-access]
   convention_sample_pages: 5
 
 netbox:
@@ -99,6 +105,19 @@ intune:
   include: [compliance, configurations, settings_catalog, apps, groups]   # groups = Übersicht der Entra-Gruppen
   fetch_ethernet_mac: true
   discovery_os: [Windows, macOS, Linux]   # leer = alle (auch iOS/Android)
+
+# Entra ID (nur lesend über Graph). Zugang leer = dieselbe App-Registrierung wie bei Intune.
+# Anwendungsberechtigungen: Policy.Read.All, RoleManagement.Read.Directory, User.Read.All, Group.Read.All,
+# optional Application.Read.All (App-Namen statt IDs). PIM-Daten nur mit Entra ID P2.
+entra:
+  enabled: false
+  tenant_id: ""
+  client_id: ""
+  client_secret: ""
+  include: [conditional_access, auth_methods, tenant_settings, roles, audit]
+  user_names: name_upn         # name_upn = "Anzeigename (UPN)", name = nur Anzeigename, count = nur Anzahl
+  breakglass: []               # Notfallkonten (UPN oder Objekt-ID), z.B. [breakglass1@firma.onmicrosoft.com]
+  max_global_admins: 4         # mehr Globale Administratoren meldet die Prüfung
 
 fortigate:
   enabled: false
@@ -173,6 +192,7 @@ schedule:
   - {job: wazuh_config, at: "03:00"}
   - {job: wazuh_sca, at: "03:30", days: [0]}   # nur montags
   # - {job: intune, at: "04:00"}
+  # - {job: entra, at: "04:15"}
   # - {job: fortigate, at: "04:30"}
   # - {job: fortigate_netbox, at: "04:45"}
   # - {job: switches, at: "01:00"}

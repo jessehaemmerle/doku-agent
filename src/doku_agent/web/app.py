@@ -346,6 +346,22 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
                 f"{perm} für {', '.join(found)}" for perm, found in missing.items()))
         return "Berechtigungen für " + ", ".join(areas) + " vorhanden"
 
+    def entra_permissions():
+        from doku_agent.generators.entra_docs import NEEDS, PROBE_AREAS
+        cfg = ctx.cfg.entra
+        groups = set().union(*(NEEDS[a] for a in cfg.include)) if cfg.include else set()
+        areas = [PROBE_AREAS[g] for g in sorted(groups)]  # dieselben Daten, die der Job lädt
+        areas += ["groups"] if groups & {"ca", "methods"} else []  # Gruppen in Zuweisungen und Zielen
+        areas += ["users"] if cfg.user_names != "count" or cfg.breakglass else []
+        areas += ["apps"] if "ca" in groups else []
+        missing = ctx.entra.missing_permissions(areas)
+        optional = missing.pop("Application.Read.All", None)
+        if missing:
+            raise RuntimeError("fehlende Anwendungsberechtigungen (Administratorzustimmung nötig): " + "; ".join(
+                f"{perm} für {', '.join(found)}" for perm, found in missing.items()))
+        return "Berechtigungen vorhanden" + (
+            "; optional fehlt Application.Read.All (App-Namen erscheinen als ID)" if optional else "")
+
     def embeddings():
         models = ctx.llm.models()
         model = ctx.cfg.embeddings.model
@@ -366,6 +382,9 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
     if ctx.cfg.intune.enabled:
         check("Intune (Graph)", lambda: f"{len(ctx.intune.managed_devices())} verwaltete Geräte")
         check("Intune-Berechtigungen", intune_permissions)
+    if ctx.cfg.entra.enabled:
+        check("Entra ID (Graph)", lambda: f"{len(ctx.entra.ca_policies())} Conditional-Access-Richtlinien")
+        check("Entra-Berechtigungen", entra_permissions)
     if ctx.cfg.fortigate.enabled:
         for dev in ctx.cfg.fortigate.devices:
             check(f"FortiGate {dev.name}", lambda dev=dev: fortigate(dev))

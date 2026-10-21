@@ -60,41 +60,57 @@ class LLMConfig(BaseModel):
     max_output_tokens: int = 2048
 
 
+# Ziel-Pfade je Dokutyp. Platzhalter in {} werden befüllt und "geslugt".
+DEFAULT_PATHS = {
+    "netbox_device": "infrastruktur/geraete/{name}",
+    "wazuh_rules": "security/wazuh/regeln/{name}",
+    "wazuh_decoders": "security/wazuh/decoder/{name}",
+    "wazuh_config": "security/wazuh/konfiguration/{name}",
+    "wazuh_sca": "security/wazuh/sca/{name}",
+    "intune_policy": "clients/intune/{category}/{name}",
+    "intune_apps": "clients/intune/apps",
+    "intune_groups": "clients/intune/gruppen",
+    "fortigate": "netzwerk/firewall/{device}/{section}",
+    "wiki_lint": "wartung/wiki-lint",
+    "coverage": "infrastruktur/abdeckung",
+    "entra": "identitaet/entra/{section}",
+    "entra_ca": "identitaet/entra/conditional-access/{name}",
+}
+# Zusätzliche Tags je Dokutyp (gelernte Tags aus dem Wiki kommen dazu).
+DEFAULT_TAGS = {
+    "netbox_device": ["netbox"],
+    "wazuh_rules": ["wazuh"],
+    "wazuh_decoders": ["wazuh"],
+    "wazuh_config": ["wazuh"],
+    "wazuh_sca": ["wazuh", "sca"],
+    "intune_policy": ["intune"],
+    "intune_apps": ["intune"],
+    "intune_groups": ["intune"],
+    "fortigate": ["firewall", "fortigate"],
+    "wiki_lint": [],
+    "coverage": ["netbox"],
+    "entra": ["entra"],
+    "entra_ca": ["entra", "conditional-access"],
+}
+
+
 class WikiConfig(BaseModel):
     url: str
     api_key: str
     locale: str = "de"
     verify_tls: TlsVerify = True
-    # Ziel-Pfade je Dokutyp. Platzhalter in {} werden befüllt und "geslugt".
-    paths: dict[str, str] = Field(default_factory=lambda: {
-        "netbox_device": "infrastruktur/geraete/{name}",
-        "wazuh_rules": "security/wazuh/regeln/{name}",
-        "wazuh_decoders": "security/wazuh/decoder/{name}",
-        "wazuh_config": "security/wazuh/konfiguration/{name}",
-        "wazuh_sca": "security/wazuh/sca/{name}",
-        "intune_policy": "clients/intune/{category}/{name}",
-        "intune_apps": "clients/intune/apps",
-        "intune_groups": "clients/intune/gruppen",
-        "fortigate": "netzwerk/firewall/{device}/{section}",
-        "wiki_lint": "wartung/wiki-lint",
-        "coverage": "infrastruktur/abdeckung",
-    })
-    # Zusätzliche Tags je Dokutyp (gelernte Tags aus dem Wiki kommen dazu).
-    tags: dict[str, list[str]] = Field(default_factory=lambda: {
-        "netbox_device": ["netbox"],
-        "wazuh_rules": ["wazuh"],
-        "wazuh_decoders": ["wazuh"],
-        "wazuh_config": ["wazuh"],
-        "wazuh_sca": ["wazuh", "sca"],
-        "intune_policy": ["intune"],
-        "intune_apps": ["intune"],
-        "intune_groups": ["intune"],
-        "fortigate": ["firewall", "fortigate"],
-        "wiki_lint": [],
-        "coverage": ["netbox"],
-    })
+    paths: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_PATHS))
+    tags: dict[str, list[str]] = Field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_TAGS.items()})
     # Wie viele Seiten pro Bereich zum Lernen der Konventionen gelesen werden.
     convention_sample_pages: int = 5
+
+    @field_validator("paths", "tags", mode="before")
+    @classmethod
+    def _with_defaults(cls, value, info):
+        """Eigene Einträge überschreiben die Standardwerte; Dokutypen neuer Versionen kommen dazu,
+        auch wenn die config.yaml nur die älteren auflistet."""
+        defaults = DEFAULT_PATHS if info.field_name == "paths" else DEFAULT_TAGS
+        return {**defaults, **(value or {})}
 
 
 class NetboxRoleRule(BaseModel):
@@ -172,6 +188,21 @@ class IntuneConfig(BaseModel):
     fetch_ethernet_mac: bool = True
     # Welche Betriebssysteme die Netbox-Discovery übernimmt (leer = alle, z.B. auch Handys).
     discovery_os: list[str] = Field(default_factory=lambda: ["Windows", "macOS", "Linux"])
+
+
+class EntraConfig(BaseModel):
+    """Entra ID über Microsoft Graph (nur lesend). Zugang leer = derselbe wie bei Intune."""
+    enabled: bool = False
+    tenant_id: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    include: list[Literal["conditional_access", "auth_methods", "tenant_settings", "roles", "audit"]] = Field(
+        default_factory=lambda: ["conditional_access", "auth_methods", "tenant_settings", "roles", "audit"])
+    # Benutzer in Richtlinien und Rollen: Anzeigename + UPN, nur Anzeigename oder nur die Anzahl
+    user_names: Literal["name_upn", "name", "count"] = "name_upn"
+    # Notfallkonten (UPN oder Objekt-ID): Die Prüfung meldet aktive Richtlinien, die sie nicht ausnehmen
+    breakglass: list[str] = Field(default_factory=list)
+    max_global_admins: int = 4  # mehr Globale Administratoren meldet die Prüfung
 
 
 class FortiGateDevice(BaseModel):
@@ -307,6 +338,7 @@ class Config(BaseModel):
     netbox: NetboxConfig = Field(default_factory=NetboxConfig)
     wazuh: WazuhConfig = Field(default_factory=WazuhConfig)
     intune: IntuneConfig = Field(default_factory=IntuneConfig)
+    entra: EntraConfig = Field(default_factory=EntraConfig)
     fortigate: FortiGateConfig = Field(default_factory=FortiGateConfig)
     switches: SwitchesConfig = Field(default_factory=SwitchesConfig)
     vcenter: VCenterConfig = Field(default_factory=VCenterConfig)

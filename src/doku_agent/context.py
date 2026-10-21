@@ -9,7 +9,7 @@ from doku_agent.config import Config
 from doku_agent.egress import EgressGuard
 from doku_agent.store import Store
 
-CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune", "embedder", "vcenter")
+CLIENTS = ("llm", "wiki", "netbox", "wazuh", "intune", "entra", "embedder", "vcenter")
 
 
 class Context:
@@ -73,6 +73,13 @@ class Context:
         if not self.cfg.intune.enabled:
             raise RuntimeError("Intune ist in der Konfiguration deaktiviert")
         return self._shared("intune", lambda: IntuneClient(self.cfg.intune, self.guard))
+
+    @cached_property
+    def entra(self):
+        from doku_agent.connectors.entra import EntraClient
+        if not self.cfg.entra.enabled:
+            raise RuntimeError("Entra ID ist in der Konfiguration deaktiviert")
+        return self._shared("entra", lambda: EntraClient(self.cfg.entra, self.cfg.intune, self.guard))
 
     @cached_property
     def vcenter(self):

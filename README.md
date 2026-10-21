@@ -2,7 +2,8 @@
 
 Lokaler KI-Agent, der IT-Dokumentation erzeugt und in **Wiki.js** pflegt – mit Fokus auf
 **Netbox** (Maschinen erkennen, eintragen und aktuell halten), **Wazuh** (eigene Regeln, Decoder, Konfiguration, SCA),
-**Intune** (Richtlinien, Profile, Apps, Entra-Gruppen) und **FortiGate** (Regelwerk, NAT, Objekte, Netzwerk, VPN,
+**Intune** (Richtlinien, Profile, Apps, Entra-Gruppen), **Entra ID** (Conditional Access, Authentifizierungsmethoden,
+Mandanten-Einstellungen, privilegierte Rollen, Prüfung) und **FortiGate** (Regelwerk, NAT, Objekte, Netzwerk, VPN,
 Prüfung), aber auch für beliebige andere Themen aus Stichpunkten und Dateien. **vCenter** (Cluster, ESXi-Hosts, VMs),
 **Switches** (SNMP/LLDP mit Verkabelung) und die **FortiGate** selbst trägt er in Netbox ein; ein **Abdeckungsbericht**
 zeigt, wo Wazuh, Intune oder Netbox fehlen. Dazu kommen **Fragen ans Wiki** mit Quellenangabe und ein **Wiki-Lint**,
@@ -30,7 +31,7 @@ der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekt
                      ├──▶ FortiGate    (REST-API, nur lesend, optional)
                      ├──▶ vCenter 7/8  (Automation-API + VI/JSON, nur lesend, optional)
                      ├──▶ Switches     (SNMP v2c/v3, nur lesend, optional)
-                     └──▶ Microsoft Graph (Intune, nur lesend, optional)
+                     └──▶ Microsoft Graph (Intune, Entra ID, nur lesend, optional)
 ```
 
 ## Was der Agent kann
@@ -49,6 +50,9 @@ der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekt
 | **Wazuh-Konfiguration** | `ossec.conf` des Managers und `agent.conf` jeder Gruppe | Zusammenfassung und Einstellungen je Abschnitt; Passwörter, API-Keys und Webhooks werden maskiert |
 | **Wazuh-SCA** | SCA-Ergebnisse aller (oder ausgewählter) Agents | Score je Richtlinie und fehlgeschlagene Prüfungen mit Behebung |
 | **Intune** | Compliance-Richtlinien, Konfigurationsprofile, Settings Catalog, Apps | Seite je Richtlinie mit Beschreibung, Zuweisungen (Gruppenname und Art: dynamisch/zugewiesen) und allen Einstellungen; App-Übersicht |
+| **Entra ID: Conditional Access** | Richtlinien, benannte Standorte, Authentifizierungsstärken | Übersicht aller Richtlinien und je Richtlinie eine Seite (Zuweisungen, Bedingungen, Steuerung, Erklärung durch das LLM); Standorte und Stärken mit „Verwendet in“ |
+| **Entra ID: Mandant und Rollen** | Authentifizierungsmethoden, Sicherheitsstandards, Benutzer-/Gast-/Zustimmungs-Einstellungen, mandantenübergreifender Zugriff, Rollen inkl. PIM | Je Bereich eine Seite; Benutzer als „Anzeigename (UPN)“ |
+| **Entra ID: Prüfung** | Alles oben zusammen | Nicht durchgesetzte Richtlinien, fehlender Grundschutz (MFA für alle und Admins, Legacy-Authentifizierung), Notfallkonten nicht ausgenommen, Verweise auf gelöschte Objekte, dauerhafte Admin-Rollen, Gäste in Admin-Rollen, riskante Mandanten-Einstellungen, SMS/Anruf aktiv |
 | **Entra-Gruppen** | Alle Gruppen, die in Intune-Zuweisungen vorkommen | Übersichtsseite mit Art, dynamischer Regel, Mitgliederzahlen (Benutzer, Geräte, Untergruppen) und allen Zuweisungen je Gruppe |
 | **FortiGate** | Policies, Adressen/Dienste, VIPs/IP-Pools, Interfaces/Zonen/Routen, IPsec | Je Firewall (und VDOM) sechs Seiten: Regeln mit Erklärung jeder Regel durch das LLM, NAT, Objekte mit Verwendung, Netzwerk, VPN und eine **Prüfung** (verdeckte Regeln, any-any, ohne Logging, Internet ohne Sicherheitsprofil, unbenutzte Objekte). PSKs und Passwörter werden nie übernommen |
 | **Freie Doku** | Stichpunkte und Dateien (TXT, Config, Log, CSV/JSON/XML/YAML, PDF, DOCX) | Der Agent sucht eine passende bestehende Seite (auch inhaltlich über den Suchindex) und ergänzt sie, oder legt eine neue im passenden Bereich an |
@@ -108,6 +112,20 @@ Administratorzustimmung fehlt (Spalte *Status* in den API-Berechtigungen). Ist e
 der Intune-Job die übrigen trotzdem und meldet am Ende einen Fehler; die Gruppen-Übersicht wird dann ausgelassen,
 weil ihr Zuweisungen fehlen würden. Nach erteilter Zustimmung holt der Agent beim nächsten Lauf selbst ein neues Token.
 
+**Entra ID (optional)** – nutzt standardmäßig dieselbe App-Registrierung wie Intune (eigener Zugang unter `entra.*`
+möglich). Zusätzliche **Anwendungsberechtigungen** (nicht delegiert), danach Administratorzustimmung erteilen:
+
+| Berechtigung | Wofür |
+|---|---|
+| `Policy.Read.All` | Conditional Access, benannte Standorte, Authentifizierungsstärken und -methoden, Mandanten-Einstellungen |
+| `RoleManagement.Read.Directory` | Rollen und Zuweisungen, mit Entra ID P2 auch PIM (berechtigt, befristet, aktiviert) |
+| `User.Read.All` | Benutzernamen und Notfallkonten (entfällt bei `user_names: count` ohne `breakglass`) |
+| `Group.Read.All` | Gruppennamen und Mitglieder ausgenommener Gruppen |
+| `Application.Read.All` | optional: Namen der Ziel-Apps statt App-IDs |
+
+`entra.enabled: true` setzen und unter `entra.breakglass` die Notfallkonten eintragen (UPN oder Objekt-ID), damit die
+Prüfung sie kennt. `doku-agent check` zeigt in „Entra-Berechtigungen“, was noch fehlt.
+
 **FortiGate (optional)** – *System › Administratoren › REST-API-Admin* anlegen, mit einem Admin-Profil, das alles
 nur lesen darf, und den Agent-Host als *Trusted Host* eintragen. Das Token als `FORTIGATE_TOKEN` in `.env`, die
 Firewall unter `fortigate.devices` eintragen und `fortigate.enabled: true` setzen. Getestet ist das Schema von
@@ -150,6 +168,7 @@ doku-agent check                         # Verbindungen und Allowlist prüfen
 doku-agent run discovery                 # Netbox-Discovery jetzt ausführen
 doku-agent run wazuh_rules               # weitere: wazuh_decoders, wazuh_config, wazuh_sca, intune, fortigate,
                                          #          fortigate_netbox, switches, netbox_devices, wiki_index, wiki_lint
+doku-agent run entra                     # Entra ID komplett; nur Teile: --param areas=conditional_access,audit
 doku-agent run fortigate --param device=fw-zentrale --param sections=policies,audit
 doku-agent run fortigate_netbox --param device=fw-zentrale   # Firewall in Netbox eintragen/abgleichen
 doku-agent run switches --param host=10.0.0.2                # ein Switch (ohne host: alle)
@@ -324,6 +343,46 @@ Nach jeder Discovery vergleicht der Agent Netbox mit den Quellen und schlägt di
 | Nicht in Netbox | von Wazuh, vCenter oder Intune gemeldet, in Netbox nicht gefunden – mit Status „Vorschlag offen“ oder „ignoriert“ |
 | Funkstille | `last_seen` älter als `coverage.stale_days` (Standard 30 Tage); ausgeschaltete VMs sind gekennzeichnet |
 
+## Entra ID
+
+Der Job `entra` liest über Microsoft Graph (nur GET) und schlägt diese Seiten unter `identitaet/entra/` vor:
+
+| Seite | Inhalt |
+|---|---|
+| `conditional-access` | Übersicht: jede Richtlinie mit Status, Benutzern, Ressourcen, Bedingungen und Steuerung, verlinkt auf ihre Seite |
+| `conditional-access/<name>` | je Richtlinie: Erklärung durch das LLM, Grunddaten, Zuweisungen (Benutzer, Gruppen, Rollen, Gäste, Apps, Benutzeraktionen), Bedingungen (Client-Apps, Plattformen, Standorte, Risiken, Gerätefilter), Gewähren und Sitzung |
+| `benannte-standorte` | IP-Bereiche und Länder, vertrauenswürdig ja/nein, verwendet in welchen Richtlinien |
+| `authentifizierungsstaerken` | integrierte und eigene Stärken mit erlaubten Methodenkombinationen |
+| `authentifizierungsmethoden` | jede Methode (FIDO2, Authenticator, SMS …) mit Status, Zielgruppen und Einstellungen; Migrationsstatus, Registrierungskampagne |
+| `mandant` | Sicherheitsstandards, Benutzer- und Gastrechte, Benutzerzustimmung für Apps, Admin-Zustimmungsanforderungen, mandantenübergreifender Zugriff (Standard und Partner) |
+| `rollen` | Verzeichnisrollen mit Zuweisungen: aktiv dauerhaft, aktiv befristet, aktiviert oder über PIM berechtigt; Admin-Rollen zuerst |
+| `pruefung` | Befunde (siehe unten) |
+
+**Prüfung:**
+
+- **Nicht durchgesetzte Richtlinien:** aus oder nur im Berichtsmodus.
+- **Grundschutz** (entfällt bei aktiven Sicherheitsstandards):
+  - Es gibt eine aktive MFA-Richtlinie für alle Benutzer und für jede Admin-Rolle der Microsoft-Vorlage.
+  - Die Richtlinien gelten ohne Standort-, Plattform-, Risiko- oder Gerätebedingung. Nur bedingt geltende Richtlinien
+    werden genannt.
+  - Legacy-Authentifizierung wird für alle blockiert.
+- **Notfallkonten:** Die Konten aus `entra.breakglass` müssen in jeder aktiven Richtlinie ausgenommen sein, direkt oder
+  über eine Gruppe. Ohne Konfiguration nennt die Prüfung Kandidaten, also Benutzer, die in vielen Richtlinien
+  ausgenommen sind.
+- **Verweise auf gelöschte Objekte:** Benutzer, Gruppen oder Standorte, die eine Richtlinie noch nennt.
+- **Privilegierte Rollen:**
+  - mehr als `max_global_admins` oder nur ein Globaler Administrator
+  - Gäste in Admin-Rollen
+  - dauerhaft aktive statt über PIM berechtigte Admin-Rollen (nur mit PIM-Daten; Notfallkonten ausgenommen)
+- **Mandant:** Jeder darf Apps registrieren, Benutzer dürfen allen Apps zustimmen, jeder darf Gäste einladen, Gäste
+  haben Mitgliederrechte.
+- **Methoden:** SMS oder Anruf sind aktiv.
+
+Erklärungen werden je Richtlinie nach Inhalt zwischengespeichert; unveränderte Richtlinien erzeugen keine neuen
+Vorschläge. Ist ein Bereich nicht lesbar (fehlende Berechtigung), werden die übrigen dokumentiert und die Prüfung
+entfällt, weil sie unvollständig wäre. Mit `user_names: count` erscheinen keine Personennamen im Wiki, nur Anzahlen
+(„2 Benutzer“, „Notfallkonto 1“).
+
 ## Firewall-Dokumentation (FortiGate)
 
 Je Firewall und VDOM entstehen sechs Seiten unter `netzwerk/firewall/<name>/`:
@@ -415,6 +474,8 @@ nur Erklärungen, Beschreibungen und freie Texte. So bleiben Fakten korrekt, auc
   `OLLAMA_NO_CLOUD=1` gesetzt (keine Cloud-Modelle, keine Websuche). Nur der einmalige `ollama-pull` hat Internet.
 - **Geheimnisse:** Tokens nur in `.env` (nicht eingecheckt). In Wazuh-Konfigurationen, Intune-Einstellungen und
   FortiGate-Objekten werden Passwörter, Keys, PSKs, Tokens und Webhooks vor dem Prompt und vor dem Wiki maskiert.
+- **Entra ID:** Benutzernamen und UPNs (z.B. ausgenommene Notfallkonten) stehen in den Seiten, wenn
+  `entra.user_names` nicht `count` ist. Sie gehen nur an das lokale Sprachmodell und ins eigene Wiki.
 - **Embeddings und Fragen** laufen über dasselbe lokale Ollama; Index und Fragen liegen in der lokalen SQLite-Datenbank.
 - **Oberfläche:** Basic-Auth (Pflicht), CSRF-Schutz, strikte Content-Security-Policy, keine externen Skripte oder Fonts,
   standardmäßig nur auf `127.0.0.1` gebunden. Der Agent-Container läuft ohne Root, mit read-only Dateisystem und
@@ -459,6 +520,10 @@ Aufbau und Entscheidungen: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
   Cluster. Mangels Testinstanz ist die vCenter-Anbindung nur gegen Fakes nach der dokumentierten API getestet.
 - Switches: VLAN-Zuordnung der Ports, Port-Channels und Stacks werden nicht gepflegt. Kabel entstehen nur, wenn die
   Gegenstelle in Netbox schon ein passendes Interface hat.
+- Entra ID: Identity-Protection-Risikorichtlinien, Zugriffsüberprüfungen, App-Registrierungen und Unternehmens-Apps
+  werden nicht dokumentiert. Der Grundschutz-Check bewertet nur Benutzer, Rollen und „alle Ressourcen“, keine
+  einzelnen Apps. PIM-Daten gibt es nur mit Entra ID P2. Mangels Testmandant ist Entra nur gegen einen Graph-Fake nach
+  dem dokumentierten Schema getestet.
 - Fragen ans Wiki kennen nur Wiki-Inhalte, keine Live-Daten aus Netbox oder Wazuh.
 - Wazuh-Alarm-Auswertungen aus dem Indexer sind nicht enthalten (bewusst ausgeklammert).
 - Bilder bzw. Screenshots in Aufträgen werden nicht ausgewertet (Vision-Modell auf CPU zu langsam).
