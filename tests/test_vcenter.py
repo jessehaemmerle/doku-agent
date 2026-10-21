@@ -204,3 +204,11 @@ def test_long_vmware_serial_fits_netbox_and_still_matches(env):
     assert serial_key(asset.serial) == serial_key(vm_step["data"]["serial"])
     # Dedup-Schlüssel (Ignorierliste, offene Vorschläge) bleibt wie vor der Kürzung
     assert asset.key == f"serial:{asset.serial.upper()}" and " " in asset.key
+
+
+def test_check_reads_vcenter(env):
+    from doku_agent.web.app import run_checks
+
+    ctx, nbf, fake = env
+    ok, message = {name: (ok, msg) for name, ok, msg in run_checks(ctx)}["vCenter"]
+    assert ok is True and message.startswith("1 Cluster, ") and message.endswith(" Hosts")

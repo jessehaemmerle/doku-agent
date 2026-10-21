@@ -362,6 +362,18 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
         return "Berechtigungen vorhanden" + (
             "; optional fehlt Application.Read.All (App-Namen erscheinen als ID)" if optional else "")
 
+    def switch(sw):
+        from doku_agent.connectors.snmp import SnmpClient
+        data = SnmpClient(sw.host, sw.snmp or ctx.cfg.switches.snmp, ctx.guard).collect({})
+        name = data.scalars.get("sysName") or b""
+        descr = data.scalars.get("sysDescr") or b""
+        text = lambda v: v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)  # noqa: E731
+        return f"{text(name) or 'ohne sysName'} – {text(descr)[:80]}"
+
+    def vcenter():
+        clusters, hosts = ctx.vcenter.clusters(), ctx.vcenter.hosts()
+        return f"{len(clusters)} Cluster, {len(hosts)} Hosts"
+
     def embeddings():
         models = ctx.llm.models()
         model = ctx.cfg.embeddings.model
@@ -389,4 +401,9 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
     if ctx.cfg.fortigate.enabled:
         for dev in ctx.cfg.fortigate.devices:
             check(f"FortiGate {dev.name}", lambda dev=dev: fortigate(dev))
+    if ctx.cfg.vcenter.enabled:
+        check("vCenter", vcenter)
+    if ctx.cfg.switches.enabled:
+        for sw in ctx.cfg.switches.devices:
+            check(f"Switch {sw.host} (SNMP)", lambda sw=sw: switch(sw))
     return checks

@@ -76,6 +76,25 @@ class SnmpClient:
             raise EgressBlocked(f"SNMP zu {host!r} blockiert (nicht in der Allowlist)")
         self.host, self.creds = host, creds
 
+    def _check_credentials(self) -> None:
+        c = self.creds
+        if c.version == "2c" and not c.community:
+            raise SnmpError(f"{self.host}: keine SNMP-Community gesetzt (SNMP_COMMUNITY in .env bzw. "
+                            f"switches.snmp.community) – ohne Community antwortet kein Switch.")
+        if c.version == "3" and not c.user:
+            raise SnmpError(f"{self.host}: SNMPv3 ohne Benutzer (switches.snmp.user).")
+        for label, key in (("auth_key", c.auth_key), ("priv_key", c.priv_key)):
+            if c.version == "3" and key and len(key) < 8:
+                raise SnmpError(f"{self.host}: SNMPv3-{label} ist kürzer als 8 Zeichen – das lässt SNMPv3 nicht zu.")
+
+    def _timeout_message(self) -> str:
+        c = self.creds
+        return (f"{self.host}: keine Antwort per SNMP {'v2c' if c.version == '2c' else 'v3'} auf UDP {c.port} "
+                f"({c.retries + 1} Versuche à {c.timeout_s:g} s). Häufigste Ursachen: falsche Community bzw. "
+                f"falsche v3-Zugangsdaten (Switches verwerfen solche Anfragen ohne Antwort); SNMP auf dem Switch "
+                f"nicht aktiv oder andere Version (v2c/v3); eine ACL auf dem Switch lässt den Agent nicht zu – "
+                f"Absender ist die IP des Docker-Hosts; eine Firewall blockiert UDP {c.port}; falsche Adresse.")
+
     def _auth(self):
         from pysnmp.hlapi.v3arch import asyncio as snmp
 
@@ -105,6 +124,8 @@ class SnmpClient:
             err, status, _, binds = await snmp.get_cmd(
                 engine, auth, target, snmp.ContextData(), *(snmp.ObjectType(snmp.ObjectIdentity(o)) for o in OIDS.values()))
             if err:
+                if "timeout" in str(err).lower():
+                    raise SnmpError(self._timeout_message())
                 raise SnmpError(f"{self.host}: {err}")
             if status:
                 raise SnmpError(f"{self.host}: {status.prettyPrint()}")
@@ -129,8 +150,10 @@ class SnmpClient:
         return data
 
     def collect(self, tables: dict[str, str] | None = None) -> SnmpData:
+        """Systemdaten und Tabellen (Standard: alle für den Abgleich; {} = nur Systemdaten)."""
+        self._check_credentials()
         try:
-            return asyncio.run(self._collect(tables or TABLES))
+            return asyncio.run(self._collect(TABLES if tables is None else tables))
         except SnmpError:
             raise
         except Exception as exc:

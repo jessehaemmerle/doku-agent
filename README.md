@@ -153,7 +153,17 @@ laufenden VMware Tools.
 `.env`) oder v3 mit Benutzer, `auth_protocol`/`auth_key` und `priv_protocol`/`priv_key`; ACL des Switches auf den
 Agent-Host beschränken. LLDP muss auf den Switches aktiv sein. Die Switches unter `switches.devices` eintragen (je
 Switch eigene Zugangsdaten möglich) und `switches.enabled: true` setzen. Benötigt werden die Standard-MIBs (IF-MIB,
-ENTITY-MIB, LLDP-MIB, BRIDGE-/Q-BRIDGE-MIB), herstellerspezifische MIBs nicht.
+ENTITY-MIB, LLDP-MIB, BRIDGE-/Q-BRIDGE-MIB), herstellerspezifische MIBs nicht. `doku-agent check` fragt jeden Switch
+einmal ab.
+
+„Keine Antwort per SNMP“ hat meist eine dieser Ursachen:
+- **Falsche Community bzw. falsche v3-Zugangsdaten:** Switches verwerfen solche Anfragen ohne Antwort.
+- **SNMP ist auf dem Switch nicht aktiv** oder läuft in einer anderen Version (v2c bzw. v3).
+- **Eine ACL lässt den Agent nicht zu:** Absender ist die IP des Docker-Hosts, nicht die des Containers.
+- **Eine Firewall blockiert UDP 161.**
+- **Die Adresse unter `switches.devices` stimmt nicht.** `10.0.0.2` ist der Beispielwert aus `config.example.yaml`.
+
+Zum Gegentest vom Docker-Host aus: `snmpget -v2c -c <community> <switch> 1.3.6.1.2.1.1.5.0`.
 
 Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml` einkommentieren und
 `verify_tls: /config/ca.pem` setzen.

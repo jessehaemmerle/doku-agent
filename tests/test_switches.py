@@ -167,3 +167,41 @@ def test_job_succeeds_when_one_switch_is_in_sync_and_another_fails(env, monkeypa
 
     monkeypatch.setattr(switches, "propose_switch", fake_propose)
     assert switches.sync_switches(ctx) == [None]
+
+
+def test_missing_community_is_reported_before_sending():
+    from doku_agent.connectors.snmp import SnmpError
+
+    client = SnmpClient("10.0.0.2", SnmpCredentials(), EgressGuard({"10.0.0.2"}))
+    with pytest.raises(SnmpError, match="keine SNMP-Community gesetzt"):
+        client.collect({})
+    v3 = SnmpClient("10.0.0.2", SnmpCredentials(version="3", user="doku", auth_key="kurz"), EgressGuard({"10.0.0.2"}))
+    with pytest.raises(SnmpError, match="kürzer als 8 Zeichen"):
+        v3.collect({})
+
+
+def test_timeout_names_the_usual_causes():
+    import socket
+
+    from doku_agent.connectors.snmp import SnmpError
+
+    silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # nimmt Pakete an, antwortet nie
+    silent.bind(("127.0.0.1", 0))
+    try:
+        creds = SnmpCredentials(community="falsch", port=silent.getsockname()[1], timeout_s=0.2, retries=0)
+        with pytest.raises(SnmpError) as exc:
+            SnmpClient("127.0.0.1", creds, EgressGuard({"127.0.0.1"})).collect({})
+    finally:
+        silent.close()
+    message = str(exc.value)
+    assert "keine Antwort per SNMP v2c" in message and "falsche Community" in message and "ACL" in message
+
+
+def test_check_lists_each_switch(ctx):
+    from doku_agent.web.app import run_checks
+
+    ctx.cfg.switches.enabled = True
+    ctx.cfg.switches.devices = [SwitchDevice(host="10.0.0.2")]
+    ctx.guard = EgressGuard.from_config(ctx.cfg)  # Switch-Hosts kommen aus der Konfiguration auf die Allowlist
+    ok, message = {name: (ok, msg) for name, ok, msg in run_checks(ctx)}["Switch 10.0.0.2 (SNMP)"]
+    assert ok is False and "keine SNMP-Community gesetzt" in message
