@@ -496,8 +496,25 @@ Einstellbar unter `narrative`:
 - `enabled: false` schaltet die zusätzlichen Abschnitte ganz ab.
 
 **Nach dem Update:** Bestehende Seiten bekommen die neuen Abschnitte als normalen Vorschlag mit Diff, oben eingefügt.
-Eigene Texte bleiben unverändert. Beim ersten Lauf entsteht dafür viel Text auf einmal, mit entsprechend Rechenzeit (siehe
-Messwerte unten). Danach wird nur noch geänderter Inhalt neu formuliert.
+Eigene Texte bleiben unverändert. Beim ersten Lauf entsteht dafür viel Text auf einmal, entsprechend lange rechnet der
+Agent. Danach wird nur noch geänderter Inhalt neu formuliert.
+
+**Gemessen** mit `qwen3:8b` auf 4 CPU-Kernen ohne GPU (langsame Testumgebung, auf echter Hardware eher schneller):
+
+| Text | Dauer | Ergebnis |
+|---|---|---|
+| Steckbrief (VM mit Firewall-Regeln) | 150 s | bestanden im ersten Versuch |
+| Conditional-Access-Richtlinie | 121 s | bestanden im ersten Versuch |
+| Bewertung der FortiGate-Prüfung | 188 s | bestanden im ersten Versuch |
+| Intune-Compliance-Richtlinie | 212 s | bestanden im ersten Versuch |
+
+Grob zwei bis vier Minuten je Text: 100 Steckbriefe brauchen beim ersten Lauf also einige Stunden, nachts unkritisch.
+In einem früheren Versuch hat die Prüfung echte Fehler des Modells abgefangen: einen verstümmelten Interface-Namen
+(„ens19,2“ statt `ens192`) und eine falsch addierte Befundzahl.
+
+**Was die Prüfung nicht leistet:** Sie erkennt erfundene oder falsch abgeschriebene Werte, aber keine falschen
+Zusammenhänge zwischen echten Werten. Im Versuch ordnete eine Bewertung etwa eine Regel der falschen Prüfung zu. Den Text
+deshalb bei der Freigabe lesen. Die Tabellen darunter sind immer exakt.
 
 ## Datenschutz und Sicherheit
 

@@ -19,7 +19,7 @@ from doku_agent.context import Context
 from doku_agent.generators.common import digest
 from doku_agent.llm import LLMError
 
-VERSION = 3  # erhöhen, wenn sich Prompt oder Prüfung ändern (alle Texte werden dann neu erzeugt)
+VERSION = 4  # erhöhen, wenn sich Prompt oder Prüfung ändern (alle Texte werden dann neu erzeugt)
 RETRY_FALLBACK_DAYS = 7  # eine feste Vorlage wird nach dieser Zeit erneut durch Fließtext zu ersetzen versucht
 
 PROSE_RULES = (
@@ -240,11 +240,12 @@ def assessment(ctx: Context, key: str, *, expert: str, subject: str,
     affected = sum(1 for _, _, rows in sections if rows)
     # Summen gleich mitgeben: sonst rechnet das Modell selbst (und verrechnet sich)
     facts = (context.strip() + "\n" if context else "") + \
-        f"Befunde gesamt: {total}, in {affected} von {len(sections)} Prüfungen\n" + findings_facts(sections)
+        f"Befunde gesamt: {total}\nPrüfungen mit Befunden: {affected} von {len(sections)}\n" + findings_facts(sections)
     return narrate(
         ctx, key, expert=expert, fallback=fallback, facts=facts,
         task=f"Bewerte das Ergebnis dieser automatischen Prüfung von {subject} für das IT-Team: Wie ist der "
-             "Gesamtzustand? Welche Befunde sind am dringendsten und warum (welches Risiko besteht)? Was sollte "
+             "Gesamtzustand? Welche Befunde sind am dringendsten und warum (welches Risiko besteht)? Ordne jeden "
+             "Befund nur der Prüfung zu, unter der er steht. Was sollte "
              "konkret als Nächstes getan werden, in sinnvoller Reihenfolge? Gibt es keine Befunde, sage das kurz "
              "und nenne, was geprüft wurde.")
 

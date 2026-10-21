@@ -244,3 +244,23 @@ Das Code-Review fand neun Punkte; alle sind behoben und in `tests/test_narrative
 - Gemeldet wurden Token-Teile statt der ganzen Angabe.
 - Kleine VMs bekamen „0 GB“.
 
+### Versuch mit qwen3:8b (21.10.2026)
+
+Vier typische Texte: Steckbrief, CA-Richtlinie, FortiGate-Bewertung und Intune-Richtlinie, auf 4 CPU-Kernen.
+
+**Erster Durchgang:** Drei Texte wurden verworfen. Fehlalarme gab es durch zitierte bzw. fett gesetzte Wortgruppen wie
+„IP-Adressen“ oder „Plattform Ubuntu 24.04“. Echte Fehler wurden korrekt erkannt: „ens19,2“ statt `ens192` und
+eine selbst addierte, falsche Befundzahl.
+
+**Korrekturen:**
+- Wortgruppen werden nicht mehr als Ganzes verglichen; ihre technischen Bestandteile prüft die Wortprüfung.
+- Versionsbestandteile gelten als belegt.
+- Name mit Nummer (`webfarm-01`) gilt nur als Ganzes als belegt.
+- Bewertungen bekommen die Summen vorgegeben.
+
+**Zweiter Durchgang:** Alle vier Texte bestanden im ersten Versuch, in 121 bis 212 s je Text.
+
+Inhaltlich waren sie korrekt bis auf falsch zugeordnete Befunde in der Bewertung. Darauf reagiert jetzt der Prompt
+(„Ordne jeden Befund nur der Prüfung zu, unter der er steht“), und die Summenzeile ist eindeutiger formuliert.
+Grundsätzlich bleibt: Die Prüfung sichert Werte, nicht Beziehungen zwischen Werten.
+
