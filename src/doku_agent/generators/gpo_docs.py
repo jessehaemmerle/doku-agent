@@ -18,6 +18,7 @@ from doku_agent.connectors.ad import Entry
 from doku_agent.context import Context
 from doku_agent.generators import narrative
 from doku_agent.generators.ad_common import AdData, AdNames, day, ou_path
+from doku_agent.generators.common import mask_value
 from doku_agent.pages import Block, PageDraft, propose_page, render_path
 
 GUID_RE = re.compile(r"\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}")
@@ -85,6 +86,7 @@ PREF_LABELS = {"userName": "Benutzer", "newName": "neuer Name", "fullName": "vol
                "accountName": "Konto", "fromPath": "Quelle", "targetPath": "Ziel", "shortcutPath": "Verknüpfung",
                "runAs": "ausführen als", "logonType": "Anmeldetyp", "Befehl": "Befehl"}
 
+PREF_ACCOUNTS = {"runAs", "accountName"}  # können Personen sein (im Modus count nicht namentlich)
 PREF_BOOLS = {"acctDisabled", "neverExpires", "noChange", "changeLogon", "deleteAllUsers", "deleteAllGroups",
               "removeAccounts", "persistent", "useLetter", "readOnly", "hidden", "archive", "default", "user",
               "partial", "deleteFolder", "deleteSubFolders", "deleteFiles", "userDSN", "allRegular", "limitUsers"}
@@ -332,9 +334,15 @@ def gpo_acl(gpo: Entry) -> GpoAcl:
 
 
 def computers_can_read(acl: GpoAcl, domain_sid: str) -> bool:
-    """Seit MS16-072 liest der Computer die GPO auch für Benutzereinstellungen."""
+    """Seit MS16-072 liest der Computer die GPO auch für Benutzereinstellungen. Die Domänencontroller der
+    Organisation (S-1-5-9) haben in jeder GPO Leserecht und zählen deshalb nicht."""
     readers = set(acl.read)
-    return bool(readers & {"S-1-5-11", "S-1-1-0", "S-1-5-9", f"{domain_sid}-515"})
+    return bool(readers & {"S-1-5-11", "S-1-1-0", f"{domain_sid}-515"})
+
+
+def ms16_072(gpo: Entry, acl: GpoAcl, domain_sid: str) -> bool:
+    """Benutzereinstellungen, die nicht greifen, weil Computer die GPO nicht lesen dürfen."""
+    return acl.readable and bool(gpo.str("gPCUserExtensionNames")) and not computers_can_read(acl, domain_sid)
 
 
 # --- SYSVOL --------------------------------------------------------------------------------------
@@ -386,13 +394,13 @@ def load_files(ctx: Context, data: AdData, guid: str) -> GpoFiles:
     fremden Server zeigen)."""
     if not GUID_RE.fullmatch(guid or ""):
         return GpoFiles(found=False, errors=[f"ungültige GPO-Kennung {guid!r}"])
-    from doku_agent.connectors.sysvol import SysvolAccessDenied
+    from doku_agent.connectors.sysvol import SysvolFileError
     root = f"{data.dns}\\Policies\\{guid}"
     try:
         if ctx.sysvol.listdir(root) is None:
             return GpoFiles(found=False)
         entries = _walk(ctx, root)
-    except SysvolAccessDenied as exc:  # Rechte der GPO in SYSVOL geändert: nur diese GPO betroffen
+    except SysvolFileError as exc:  # Rechte der GPO in SYSVOL geändert: nur diese GPO betroffen
         return GpoFiles(errors=[f"Ordner nicht lesbar: {exc}"])
     files = GpoFiles()
     for path, size in entries:
@@ -419,7 +427,7 @@ def load_files(ctx: Context, data: AdData, guid: str) -> GpoFiles:
                     (area, gpo_files.parse_preferences(ctx.sysvol.read(path) or b"")))
             elif name not in KNOWN and not ("scripts" in low and len(low) > 3):
                 files.other.append(rel)
-        except (gpo_files.GpoFileError, SysvolAccessDenied) as exc:
+        except (gpo_files.GpoFileError, SysvolFileError, ValueError) as exc:  # eine kaputte Datei betrifft nur sich
             files.errors.append(f"{rel}: {exc}")
     return files
 
@@ -505,7 +513,7 @@ def _access_value(key: str, value: str) -> str:
 
 def _security_option(path: str, kind: str, value: str) -> tuple[str, str]:
     label, values = SECURITY_OPTIONS.get(path.lower(), (path, None))
-    value = value.strip().strip('"')
+    value = str(mask_value(path.replace("\\", "/").rsplit("/", 1)[-1], value.strip().strip('"')))
     if values and value in values:
         return label, f"{values[value]} ({value})"
     if kind == "4" and values is None and value in ("0", "1") and path.lower() in SECURITY_OPTIONS:
@@ -601,7 +609,7 @@ def scope_markdown(scope: str, files: GpoFiles, catalog, names: AdNames) -> tupl
                 if kind in ("del", "delvals", "deletevalues", "deletekeys"):
                     rows.append([f"{hive}\\{e.key}", name or "(alle Werte)", "löschen", "–"])
                 elif kind != "securekey":
-                    rows.append([f"{hive}\\{e.key}", name or "(Standard)", e.type_name, e.text()])
+                    rows.append([f"{hive}\\{e.key}", name or "(Standard)", e.type_name, str(mask_value(name, e.text()))])
             title = "### Registrierungswerte" + (" ohne administrative Vorlage" if catalog is not None else "")
             parts.append(f"{title}\n\n" + markdown.table(["Schlüssel", "Wert", "Typ", "Daten"], rows))
             facts += [f"Registrierungswert {r[0]}\\{r[1]} = {r[3]}" for r in rows]
@@ -630,10 +638,21 @@ def scope_markdown(scope: str, files: GpoFiles, catalog, names: AdNames) -> tupl
     rows = []
     for area, items in prefs:
         for item in items:
-            details = [f"{PREF_LABELS.get(k, k)}: " + ({"0": "nein", "1": "ja"}.get(v, v) if k in PREF_BOOLS else v)
-                       for k, v in item.details if v != "NOCHANGE"]
+            details = []
+            for k, v in item.details:
+                if v == "NOCHANGE":
+                    continue
+                if k in PREF_BOOLS:
+                    v = {"0": "nein", "1": "ja"}.get(v, v)
+                elif k in PREF_ACCOUNTS or (k == "userName" and item.kind != "User"):
+                    v = names.principal(v) if names.mode == "count" else v
+                elif k == "fullName" and names.mode == "count":
+                    continue
+                details.append(f"{PREF_LABELS.get(k, k)}: {v}")
             if item.members:
-                details.append("Mitglieder: " + ", ".join(item.members))
+                details.append("Mitglieder: " + ", ".join(
+                    f"{action}: {names.sid(sid) if sid and (names.mode == 'count' or not name) else name or '?'}"
+                    for action, name, sid in item.members))
             if item.has_cpassword:
                 details.append("**gespeichertes Kennwort (cpassword)**")
             rows.append([area, item.name + (" (deaktiviert)" if item.disabled else ""), item.action or "–",
@@ -748,16 +767,21 @@ def gpo_page(ctx: Context, data: AdData, gpo: Entry, names: AdNames, all_links: 
         sec_rows.append(["Bearbeiten dürfen (außer Administratoren)",
                          ", ".join(sorted(names.sid(s) for s in acl.edit)) or "–"])
         sec_rows.append(["Besitzer", names.sid(acl.owner) if acl.owner else "–"])
-        if not computers_can_read(acl, data.domain_sid):
+        if ms16_072(gpo, acl, data.domain_sid):
             sec_rows.append(["Hinweis", "Computer haben kein Leserecht (MS16-072) – Benutzereinstellungen greifen nicht"])
         security = markdown.table(["Berechtigung", "Wer"], sec_rows)
     else:
         security = "_Berechtigungen nicht lesbar._"
 
-    facts = [f"Status: {STATUS.get(flags, flags)}", f"WMI-Filter: {wmi_text or 'keiner'}"]
-    facts += [f"Verknüpft mit {lk.target} ({lk.kind}), Reihenfolge {lk.order}"
-              + (", erzwungen" if lk.enforced else "") + ("" if lk.enabled else ", Verknüpfung deaktiviert")
-              for lk in gpo_links] or ["Nicht verknüpft"]
+    active = [lk.target for lk in gpo_links if lk.enabled]
+    effect = {0: "Computer- und Benutzereinstellungen wirken", 1: "nur die Computereinstellungen wirken",
+              2: "nur die Benutzereinstellungen wirken", 3: "keine Einstellung wirkt"}.get(flags, "")
+    facts = [f"Status der GPO: {STATUS.get(flags, flags)} ({effect})",
+             "Wirkt an: " + (", ".join(active) if active and flags != 3 else "nirgends"),
+             f"WMI-Filter: {wmi_text or 'keiner'}"]
+    facts += [f"Verknüpfung an {lk.target} ({lk.kind}): " + ("aktiv" if lk.enabled else "deaktiviert, wirkt dort nicht")
+              + f", Reihenfolge {lk.order}" + (", erzwungen" if lk.enforced else "") for lk in gpo_links] \
+        or ["Nicht verknüpft"]
     if acl.readable:
         facts.append("Angewendet auf: " + (", ".join(sorted(names.sid(s) for s in acl.apply)) or "niemand"))
     blocks_cfg = []

@@ -34,7 +34,7 @@ class GpoFileError(ValueError):
 def decode_text(data: bytes) -> str:
     """Textdatei aus SYSVOL: UTF-16 mit BOM (GptTmpl.inf, scripts.ini), sonst UTF-8 bzw. ANSI."""
     if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
-        return data.decode("utf-16")
+        return data.decode("utf-16", "replace")  # abgeschnittene Dateien (z.B. während der Replikation)
     if data.startswith(b"\xef\xbb\xbf"):
         return data[3:].decode("utf-8", "replace")
     if len(data) >= 2 and data[1:2] == b"\x00":  # UTF-16LE ohne BOM
@@ -84,9 +84,16 @@ def parse_registry_pol(data: bytes) -> list[RegEntry]:
     """PReg-Datei: Kopf 'PReg' + Version 1, dann Einträge [Schlüssel;Wert;Typ;Größe;Daten] in UTF-16LE."""
     if not data:
         return []
-    if data[:4] != PREG_SIGNATURE or struct.unpack("<I", data[4:8])[0] != 1:
+    if len(data) < 8 or data[:4] != PREG_SIGNATURE or struct.unpack("<I", data[4:8])[0] != 1:
         raise GpoFileError("Registry.pol: unbekanntes Format (Kopf 'PReg', Version 1 erwartet)")
     pos, out = 8, []
+
+    def dword() -> int:
+        nonlocal pos
+        if pos + 4 > len(data):
+            raise GpoFileError("Registry.pol: Datei endet mitten in einem Eintrag")
+        pos += 4
+        return struct.unpack("<I", data[pos - 4:pos])[0]
 
     def expect(char: str) -> None:
         nonlocal pos
@@ -109,11 +116,9 @@ def parse_registry_pol(data: bytes) -> list[RegEntry]:
         expect(";")
         value = string()
         expect(";")
-        kind = struct.unpack("<I", data[pos:pos + 4])[0]
-        pos += 4
+        kind = dword()
         expect(";")
-        size = struct.unpack("<I", data[pos:pos + 4])[0]
-        pos += 4
+        size = dword()
         expect(";")
         raw = data[pos:pos + size]
         if len(raw) != size:
@@ -322,6 +327,8 @@ PREF_FIELDS = {
 }
 TASK_TAGS = {"Task", "ImmediateTask", "TaskV2", "ImmediateTaskV2"}
 SECRET_ATTRS = {"cpassword"}
+# Elemente, deren Attribut 'value' zu einem benannten Wert gehört: Registry (name), Umgebung (name), INI (property)
+VALUE_NAME_ATTR = {"Registry": "name", "EnvironmentVariable": "name", "IniFile": "property"}
 
 
 @dataclass
@@ -333,7 +340,7 @@ class PrefItem:
     disabled: bool = False
     has_cpassword: bool = False
     filters: list[str] = field(default_factory=list)  # Zielgruppenadressierung (Item-Level Targeting)
-    members: list[str] = field(default_factory=list)  # lokale Gruppe: Mitglieder (Aktion Name)
+    members: list[tuple[str, str, str]] = field(default_factory=list)  # lokale Gruppe: (Aktion, Name, SID)
 
 
 def _local(tag: str) -> str:
@@ -395,12 +402,13 @@ def parse_preferences(data: bytes) -> list[PrefItem]:
                 attrs = sorted((a for a in attrs if a[0] in order and a[1] not in ("", None)), key=lambda a: order[a[0]])
             else:
                 attrs = [a for a in attrs if a[1] not in ("", None)][:8]
-            details = [(k, str(mask_value(k, v))) for k, v in attrs]
+            owner = props.get(VALUE_NAME_ATTR.get(kind, ""), "")
+            details = [(k, str(mask_value(owner if k == "value" and owner else k, v))) for k, v in attrs]
         members = []
         for m in props.iter():
             if _local(m.tag) == "Member":
-                members.append(f"{'Hinzufügen' if (m.get('action') or '').upper() == 'ADD' else 'Entfernen'}: "
-                               f"{m.get('name') or m.get('sid') or '?'}")
+                members.append(("Hinzufügen" if (m.get("action") or "").upper() == "ADD" else "Entfernen",
+                                m.get("name") or "", m.get("sid") or ""))
         items.append(PrefItem(kind=kind, name=elem.get("name") or props.get("name") or "",
                               action=ACTIONS.get((props.get("action") or "").upper(), props.get("action") or ""),
                               details=details, disabled=all_disabled or elem.get("disabled") == "1",
@@ -689,34 +697,49 @@ class AdmxCatalog:
     @staticmethod
     def _setting(policy: AdmxPolicy, hits: list[tuple[AdmxElement | None, RegEntry]]) -> PolicySetting:
         state, options = "", []
-        own = [e for el, e in hits if el is None and special_value(e.value)[1].lower() == policy.value_name.lower()
-               and policy.value_name]
-        for entry in own:
-            if policy.enabled_value and policy.enabled_value.matches(entry):
-                state = "Aktiviert"
-            elif policy.disabled_value and policy.disabled_value.matches(entry):
-                state = "Deaktiviert"
-            elif policy.enabled_value is None and policy.disabled_value is None:
-                # ohne Angabe: 1 = aktiviert, 0 bzw. gelöscht = deaktiviert
-                if special_value(entry.value)[0] == "del" or entry.data == 0:
-                    state = "Deaktiviert"
-                elif entry.data == 1:
+
+        def list_state(entry: RegEntry) -> str:
+            for items, label in ((policy.enabled_list, "Aktiviert"), (policy.disabled_list, "Deaktiviert")):
+                for key, name, value in items:
+                    if key.lower() == entry.key.lower() and name.lower() == special_value(entry.value)[1].lower() \
+                            and value.matches(entry):
+                        return label
+            return ""
+
+        for el, entry in hits:
+            if el is not None:
+                continue
+            kind, name = special_value(entry.value)
+            if policy.value_name and name.lower() == policy.value_name.lower():
+                if policy.enabled_value and policy.enabled_value.matches(entry):
                     state = "Aktiviert"
+                elif policy.disabled_value and policy.disabled_value.matches(entry):
+                    state = "Deaktiviert"
+                elif kind == "del" and policy.disabled_value is None:
+                    state = "Deaktiviert"  # ohne disabledValue wird beim Deaktivieren der Wert gelöscht
+                elif policy.enabled_value is None and policy.disabled_value is None:
+                    # ohne Angabe: 1 = aktiviert, 0 = deaktiviert
+                    state = "Aktiviert" if entry.data == 1 else "Deaktiviert" if entry.data == 0 else state
+            state = state or list_state(entry)
         list_values: dict[str, list[str]] = {}
         deleted_elements = 0
         element_hits = [(el, e) for el, e in hits if el is not None]
         for el, entry in element_hits:
-            kind, _ = special_value(entry.value)
+            kind, name = special_value(entry.value)
             if kind == "del":
-                deleted_elements += 1
+                if el.kind == "boolean" and el.false_value and el.false_value.kind == "delete":
+                    options.append((el.label or el.id, "nein"))  # "aus" wird als Löschen gespeichert
+                else:
+                    deleted_elements += 1
                 continue
             if el.kind == "list":
                 if kind in ("delvals", "deletevalues", "securekey") or not entry.value:
                     continue
-                shown = f"{entry.value} = {entry.text()}" if el.explicit_value else entry.text()
+                text = str(mask_value(entry.value, entry.text()))
+                shown = f"{entry.value} = {text}" if el.explicit_value else text
                 list_values.setdefault(el.label or el.id, []).append(shown)
                 continue
-            options.append((el.label or el.id, _element_text(el, entry)))
+            options.append((el.label or el.id, str(mask_value(el.value_name, _element_text(el, entry)))))
         for label, values in list_values.items():
             options.append((label, "; ".join(values)))
         if not state:

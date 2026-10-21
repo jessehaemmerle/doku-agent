@@ -112,7 +112,7 @@ def test_preferences_never_expose_cpassword():
 <Filters><FilterGroup bool="AND" not="1" name="CORP\\Server"/></Filters></Group></Groups>"""
     items = gpo_files.parse_preferences(xml)
     assert items[0].has_cpassword and "GEHEIM123" not in repr(items)
-    assert items[1].action == "Ersetzen" and items[1].members == ["Hinzufügen: CORP\\Helpdesk"]
+    assert items[1].action == "Ersetzen" and items[1].members == [("Hinzufügen", "CORP\\Helpdesk", "S-1-5-21-1-2-3-1108")]
     assert items[1].filters == ["nicht Group: CORP\\Server"]
     task = gpo_files.parse_preferences(b"""<ScheduledTasks><TaskV2 name="Inventar"><Properties action="C"
  runAs="NT AUTHORITY\\System"><Task><Actions><Exec><Command>c:\\inv.exe</Command><Arguments>/q</Arguments></Exec>
@@ -280,7 +280,8 @@ def sd(*aces, owner=f"{DOM}-512") -> bytes:
 
 def gpo_sd(apply_to="S-1-5-11", read=True, editors=()):
     aces = [Ace(ALLOWED, CONTAINER_INHERIT, FULL_CONTROL, f"{DOM}-512"), Ace(ALLOWED, CONTAINER_INHERIT, FULL_CONTROL,
-                                                                             "S-1-5-18")]
+                                                                             "S-1-5-18"),
+            Ace(ALLOWED, CONTAINER_INHERIT, READ_PROP | 0x20094, "S-1-5-9")]  # Organisations-DCs lesen jede GPO
     if read:
         aces.append(Ace(ALLOWED, CONTAINER_INHERIT, READ_PROP | 0x20094, apply_to))
     aces.append(Ace(ALLOWED_OBJECT, CONTAINER_INHERIT, CONTROL_ACCESS, apply_to, APPLY_GROUP_POLICY))
@@ -327,7 +328,8 @@ class FakeAd:
             self._gpo(GPO_A, "Default Domain Policy", 0, 0x00010001, gpo_sd()),
             self._gpo(GPO_B, "Clients - Sicherheit", 0, 0x00020003, gpo_sd(apply_to=f"{DOM}-1200", read=False,
                                                                            editors=["S-1-5-11"]),
-                      wql=f"[corp.example.test;{{11111111-1111-1111-1111-111111111111}};0]"),
+                      wql="[corp.example.test;{11111111-1111-1111-1111-111111111111};0]",
+                      user="[{5794DAFD-BE60-433F-88A2-1A31939AC01F}{2EA1A81B-48E5-45E9-8BB7-A6E3AC170006}]"),
             self._gpo(GPO_C, "Ungenutzt", 0, 0, gpo_sd(), machine=""),
         ]
         self.krbtgt = Entry.make(f"CN=krbtgt,{users}", {"objectClass": ["top", "user"], "sAMAccountName": "krbtgt",
@@ -375,7 +377,7 @@ class FakeAd:
 
     @staticmethod
     def _gpo(guid, name, flags, version, raw_sd, machine="[{35378EAC-683F-11D2-A89A-00C04FBBCFA2}{D02B1F72-3407-48AE-"
-                                                           "BA88-E8213C6761F1}]", wql=""):
+                                                           "BA88-E8213C6761F1}]", wql="", user=""):
         values = {"cn": guid, "displayName": name, "flags": flags, "versionNumber": version,
                   "gPCFileSysPath": f"\\\\corp.example.test\\SysVol\\corp.example.test\\Policies\\{guid}",
                   "whenCreated": "20240101000000.0Z", "whenChanged": "20240201000000.0Z", "nTSecurityDescriptor": raw_sd}
@@ -383,6 +385,8 @@ class FakeAd:
             values["gPCMachineExtensionNames"] = machine
         if wql:
             values["gPCWQLFilter"] = wql
+        if user:
+            values["gPCUserExtensionNames"] = user
         return Entry.make(f"CN={guid},CN=Policies,CN=System,{BASE}", values)
 
     def root(self):
@@ -410,7 +414,9 @@ class FakeAd:
             "msWMI-Parm2": '1;3;10;48;WQL;root\\CIMv2;SELECT * FROM Win32_OperatingSystem WHERE Version LIKE "10%";'})]
 
     def psos(self):
-        return []
+        return self._psos
+
+    _psos: list = []
 
     def users(self):
         return self._users
@@ -483,6 +489,14 @@ class FakeAd:
 
     def extended_rights(self):
         return {RESET_PASSWORD: ("Reset Password", 256), GET_CHANGES_ALL: ("Replicating Directory Changes All", 256)}
+
+    def resolve_dns(self, dns):
+        known = {e.dn.lower(): e for e in [*self._users, *self._computers, *self._groups.values(), self.helpdesk]}
+        return {d: known[d] for d in dns if d in known}
+
+    def accounts_by_name(self, names):
+        known = {e.str("sAMAccountName").lower(): e for e in [*self._users, *self._groups.values(), self.helpdesk]}
+        return {n: known[n] for n in names if n in known}
 
     def resolve_sids(self, sids):
         known = {e.sid(): e for e in [self.helpdesk, self.gg, *self._groups.values()]}
@@ -689,14 +703,14 @@ def test_job_and_checks(adctx):
 
 
 def test_one_unreadable_gpo_folder_does_not_stop_the_run(adctx):
-    from doku_agent.connectors.sysvol import SysvolAccessDenied
+    from doku_agent.connectors.sysvol import SysvolFileError
     from doku_agent.generators.ad_common import AdNames, fetch
     from doku_agent.generators.ad_docs import audit
 
     class Denied(FakeSysvol):
         def listdir(self, path):
             if GPO_B in path:
-                raise SysvolAccessDenied("Zugriff verweigert")
+                raise SysvolFileError("Zugriff verweigert")
             return super().listdir(path)
     adctx.__dict__["sysvol"] = Denied(sysvol_files())
     data, errors = fetch(adctx, {"base", "structure", "gpo", "files", "acl"})
@@ -704,3 +718,148 @@ def test_one_unreadable_gpo_folder_does_not_stop_the_run(adctx):
     f = audit(adctx, data, AdNames(adctx, data))
     assert any("nicht lesbar" in r[1] for r in f["gpo"] if r[0] == "Clients - Sicherheit")
     assert data.files[GPO_A.lower()].template is not None  # die anderen GPOs sind gelesen
+
+
+# --- Befunde aus dem Code-Review ----------------------------------------------------------------------
+
+def test_secrets_in_preferences_registry_and_templates_are_masked(adctx):
+    from doku_agent.generators.ad_docs import document_ad
+    files = sysvol_files()
+    root = f"corp.example.test/Policies/{GPO_B}"
+    files[f"{root}/Machine/Preferences/Registry/Registry.xml"] = (
+        b'<RegistrySettings><Registry name="DefaultPassword"><Properties action="U" hive="HKEY_LOCAL_MACHINE" '
+        b'key="SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" name="DefaultPassword" type="REG_SZ" '
+        b'value="Geheim-Pref-1!"/></Registry></RegistrySettings>')
+    files[f"{root}/Machine/Preferences/EnvironmentVariables/EnvironmentVariables.xml"] = (
+        b'<EnvironmentVariables><EnvironmentVariable name="API_TOKEN"><Properties action="U" name="API_TOKEN" '
+        b'value="Geheim-Env-2!"/></EnvironmentVariable></EnvironmentVariables>')
+    files[f"{root}/Machine/Registry.pol"] = registry_pol_bytes([
+        RegEntry(r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon", "DefaultPassword", 1, "Geheim-Pol-3!")])
+    adctx.__dict__["sysvol"] = FakeSysvol(files)
+    document_ad(adctx, ["gpo"])
+    gpo = contents(adctx)["GPO: Clients - Sicherheit"]
+    for secret in ("Geheim-Pref-1!", "Geheim-Env-2!", "Geheim-Pol-3!"):
+        assert secret not in gpo
+    prompts = " ".join(user for _, user in adctx.__dict__["llm"].calls)
+    assert "Geheim" not in prompts and "DefaultPassword" in gpo
+
+
+def test_broken_files_only_affect_their_gpo(adctx):
+    from doku_agent.generators.ad_docs import document_ad
+    files = sysvol_files()
+    files[f"corp.example.test/Policies/{GPO_B}/Machine/Registry.pol"] = b"PReg"  # abgeschnitten
+    files[f"corp.example.test/Policies/{GPO_A}/MACHINE/Microsoft/Windows NT/SecEdit/GptTmpl.inf"] = \
+        b"\xff\xfe[\x00K\x00"  # ungerade Länge
+    adctx.__dict__["sysvol"] = FakeSysvol(files)
+    document_ad(adctx)
+    pages = contents(adctx)
+    assert "Registry.pol" in block(pages["GPO: Clients - Sicherheit"], "ad-gpo-machine")
+    assert "Active Directory: OU-Struktur und Delegationen" in pages and "Active Directory: Prüfung" in pages
+
+
+def test_large_or_vanishing_file_is_a_per_file_error(adctx):
+    from doku_agent.connectors.sysvol import SysvolFileError
+    from doku_agent.generators.ad_common import fetch
+
+    class Odd(FakeSysvol):
+        def read(self, path):
+            if path.endswith("Groups.xml"):
+                raise SysvolFileError("STATUS_DELETE_PENDING")
+            return super().read(path)
+    adctx.__dict__["sysvol"] = Odd(sysvol_files())
+    data, errors = fetch(adctx, {"base", "structure", "gpo", "files", "acl"})
+    assert errors == {} and any("Groups.xml" in e for e in data.files[GPO_B.lower()].errors)
+
+
+def test_pso_scope_in_count_mode_and_stable_between_job_and_lint(adctx, fake_wiki):
+    from doku_agent.generators.ad_docs import document_ad
+    from doku_agent.lint import refresh
+    ad = adctx.ad
+    ad._psos = [Entry.make(f"CN=PSO-Test,CN=Password Settings Container,CN=System,{BASE}", {
+        "name": "PSO-Test", "msDS-PasswordSettingsPrecedence": 5, "msDS-MinimumPasswordLength": 14,
+        "msDS-PasswordComplexityEnabled": True, "msDS-LockoutThreshold": 5, "msDS-LockoutDuration": -0x8000000000000000,
+        "msDS-PSOAppliesTo": [ad.anna.dn, f"CN=Domain Admins,CN=Users,{BASE}"]})]
+    document_ad(adctx, ["password_policy"])
+    page = contents(adctx)["Active Directory: Kennwort- und Sperrrichtlinien"]
+    psos = block(page, "ad-password-psos")
+    assert "Anna Admin (anna)" in psos and "Domänen-Admins" in psos and "bis ein Administrator entsperrt" in psos
+    for p in adctx.store.list_proposals():  # übernehmen, dann muss der Wiki-Lint dieselbe Seite erzeugen
+        fake_wiki.add(p.payload["path"], p.payload["title"], p.payload["content"], tags=p.payload["tags"],
+                      description=p.payload["description"])
+    adctx.__dict__.pop("conventions", None)
+    assert refresh(adctx, "ad:kennwortrichtlinien") is None
+    adctx.cfg.ad.user_names = "count"
+    document_ad(adctx, ["password_policy"])
+    page = [p for p in adctx.store.list_proposals() if p.title.endswith("Sperrrichtlinien")][-1].payload["content"]
+    assert "Anna" not in page and "Benutzer" in block(page, "ad-password-psos")
+
+
+def test_ms16_072_with_enterprise_dc_read(adctx):
+    """Organisations-DCs lesen jede GPO – das zählt nicht als Leserecht der Computer."""
+    from doku_agent.generators import gpo_docs
+    g = adctx.ad.gpo(GPO_B)
+    acl = gpo_docs.gpo_acl(g)
+    assert "S-1-5-9" in acl.read and gpo_docs.ms16_072(g, acl, DOM)
+    assert not gpo_docs.ms16_072(adctx.ad.gpo(GPO_A), gpo_docs.gpo_acl(adctx.ad.gpo(GPO_A)), DOM)
+
+
+def test_trust_sid_filtering_direction(adctx):
+    from doku_agent.generators.ad_common import AdNames, fetch
+    from doku_agent.generators.ad_docs import audit
+
+    def trust(name, direction, kind=2):
+        return Entry.make(f"CN={name},CN=System,{BASE}", {"trustPartner": name, "trustDirection": direction,
+                                                          "trustType": kind, "trustAttributes": 0})
+    adctx.ad.trusts = lambda: [trust("out.test", 2), trust("in.test", 1), trust("mit.test", 2, kind=3)]
+    data, _ = fetch(adctx, {"base", "topology"})
+    text = str(audit(adctx, data, AdNames(adctx, data))["domain"])
+    assert "out.test" in text and "in.test" not in text and "mit.test" not in text
+
+
+def test_admx_list_delete_and_boolean_false_delete():
+    admx = f"""<policyDefinitions {NS}><policyNamespaces><target prefix="x" namespace="X"/></policyNamespaces>
+<policies>
+<policy name="L" class="Machine" displayName="Liste" key="Software\\L">
+<enabledList><item valueName="On"><value><decimal value="1"/></value></item></enabledList>
+<disabledList><item valueName="On"><value><decimal value="0"/></value></item></disabledList></policy>
+<policy name="E" class="Machine" displayName="Nur enabledValue" key="Software\\E" valueName="V">
+<enabledValue><decimal value="1"/></enabledValue></policy>
+<policy name="B" class="Machine" displayName="Schalter" presentation="$(presentation.B)" key="Software\\B">
+<elements><boolean id="S" valueName="Flag"><trueValue><decimal value="1"/></trueValue><falseValue><delete/></falseValue>
+</boolean></elements></policy>
+</policies></policyDefinitions>"""
+    cat = gpo_files.AdmxCatalog().load({"x.admx": admx.encode()}, {})
+    on, _ = cat.evaluate("Machine", [RegEntry(r"Software\L", "On", 4, 1)])
+    off, _ = cat.evaluate("Machine", [RegEntry(r"Software\L", "On", 4, 0), RegEntry(r"Software\E", "**del.V", 1, " "),
+                                      RegEntry(r"Software\B", "**del.Flag", 1, " ")])
+    assert [(s.policy.display, s.state) for s in on] == [("Liste", "Aktiviert")]
+    states = {s.policy.display: (s.state, s.options) for s in off}
+    assert states["Liste"][0] == "Deaktiviert" and states["Nur enabledValue"][0] == "Deaktiviert"
+    assert states["Schalter"] == ("Aktiviert", [("S", "nein")])
+
+
+def test_kerberos_settings_follow_link_order_per_setting(adctx):
+    from doku_agent.generators import ad_docs
+    from doku_agent.generators.ad_common import fetch
+    ad = adctx.ad
+    ad._domain.attrs["gplink"] = [link((GPO_A, 0), (GPO_C, 0)).encode()]  # GPO_C hat Reihenfolge 1
+    files = sysvol_files()
+    files[f"corp.example.test/Policies/{GPO_C}/Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf"] = u16(
+        "[Kerberos Policy]\nMaxTicketAge = 8\n")
+    adctx.__dict__["sysvol"] = FakeSysvol(files)
+    data, _ = fetch(adctx, {"base", "structure", "gpo", "files"})
+    result = {k: (v, src) for k, v, src in ad_docs.kerberos_settings(data)}
+    assert result["MaxTicketAge"] == ("8", "Ungenutzt") and result["MaxClockSkew"] == ("5", "Default Domain Policy")
+
+
+def test_ranged_attribute_uses_reported_range(tmp_path):
+    cfg = make_config(tmp_path, ad={"enabled": True, "domain": "corp.example.test", "username": "u@x"})
+    client = AdClient(cfg.ad, EgressGuard(set()))
+    pages = [{"member;range=0-999": [b"a"] * 1000}, {"member;range=1000-*": [b"b"] * 5}]
+    asked = []
+
+    def search(base, flt, attrs, scope="sub", sd=False):
+        asked.append(attrs[0])
+        return [Entry(base, pages[len(asked) - 1])]
+    client.search = search
+    assert len(client.ranged("CN=G", "member")) == 1005 and asked == ["member;range=0-*", "member;range=1000-*"]

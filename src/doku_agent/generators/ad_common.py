@@ -22,8 +22,11 @@ FUNCTIONAL_LEVELS = {0: "Windows 2000", 1: "Windows Server 2003 (Interim)", 2: "
 
 # Privilegierte Gruppen: (RID in der Domäne oder SID von Builtin, Anzeige-Reihenfolge)
 PRIVILEGED_RIDS = [519, 512, 518, "S-1-5-32-544", 527, 526, "S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-551",
-                   "S-1-5-32-550", 520]
+                   "S-1-5-32-550", "S-1-5-32-552", 520]
 PROTECTED_USERS = 525
+
+# Domänenteil eingebauter Konten (nie Personen)
+WELL_KNOWN_DOMAINS = {"NT AUTHORITY", "NT-AUTORITÄT", "AUTORITE NT", "BUILTIN", "VORDEFINIERT", "NT SERVICE"}
 
 # Datengruppen und welcher Bereich sie braucht
 GROUPS = ("base", "structure", "gpo", "files", "password", "accounts", "privileged", "topology", "acl")
@@ -221,6 +224,14 @@ def fetch(ctx: Context, groups: set[str]) -> tuple[AdData, dict[str, str]]:
         if name == "files" and "gpo" not in data.loaded:
             continue
         load(name, fn)
+    # Reihenfolge der LDAP-Antworten kann je DC abweichen – Seiten sollen davon nicht abhängen
+    for attr in ("ous", "sites", "gpos", "wmi", "psos", "users", "computers", "msas", "dcs", "ntds", "subnets",
+                 "site_links", "trusts", "features"):
+        setattr(data, attr, sorted(getattr(data, attr), key=lambda e: e.dn.lower()))
+    for pg in data.privileged:
+        pg.members.sort(key=lambda e: e.dn.lower())
+        pg.primary.sort(key=lambda e: e.dn.lower())
+        pg.direct.sort(key=str.lower)
     if "topology" not in groups:
         try:
             data.crossref = client.crossref()
@@ -246,6 +257,8 @@ class AdNames:
             for m in pg.members + pg.primary:
                 self._add(m)
         self._unknown: set[str] = set()
+        self._unknown_dns: set[str] = set()
+        self._accounts: dict[str, Entry | None] = {}
 
     def _add(self, e: Entry) -> None:
         sid = e.sid()
@@ -258,11 +271,7 @@ class AdNames:
                           and s not in self._unknown and s.startswith(("S-1-5-21-", "S-1-5-32-"))})
         if not missing:
             return
-        try:
-            found = self.ctx.ad.resolve_sids(missing)
-        except AdError as exc:
-            self.ctx.log.warning("SIDs nicht auflösbar, es erscheinen SIDs: %s", exc)
-            found = {}
+        found = self.ctx.ad.resolve_sids(missing)  # Störung: Lauf abbrechen statt SIDs statt Namen zu zeigen
         for sid in missing:
             if sid in found:
                 self._add(found[sid])
@@ -305,9 +314,41 @@ class AdNames:
             return DOMAIN_RIDS[r]
         return sid
 
+    def resolve_dns(self, dns) -> None:
+        missing = sorted({d.lower() for d in dns if d and d.lower() not in self.by_dn
+                          and d.lower() not in self._unknown_dns})
+        if not missing:
+            return
+        found = self.ctx.ad.resolve_dns(missing)
+        for dn in missing:
+            if dn in found:
+                self._add(found[dn])
+            else:
+                self._unknown_dns.add(dn)
+
+    def dn(self, dn: str) -> str:
+        """Objekt über den DN; Job und Wiki-Lint liefern denselben Namen, auch ohne geladene Konten."""
+        self.resolve_dns([dn])
+        e = self.by_dn.get(dn.lower())
+        if e is not None:
+            return self.entry(e)
+        return "gelöschtes oder nicht lesbares Objekt" if self.mode == "count" else rdn(dn)
+
     def principal(self, value: str) -> str:
-        """Eintrag aus GptTmpl.inf: SID (ohne *) oder Name."""
-        return self.sid(value) if value.upper().startswith("S-1-") else value
+        """Eintrag aus GptTmpl.inf oder Preferences: SID (ohne *) oder Name (auch DOMÄNE\\Name)."""
+        value = value.strip()
+        if value.upper().startswith("S-1-"):
+            return self.sid(value)
+        domain, sep, account = value.rpartition("\\")
+        if domain.upper() in WELL_KNOWN_DOMAINS or value.startswith("%"):
+            return value
+        key = (account if sep else value).lower()
+        if key not in self._accounts:
+            self._accounts[key] = self.ctx.ad.accounts_by_name([key]).get(key)
+        e = self._accounts[key]
+        if e is not None:
+            return self.entry(e)
+        return "Konto" if self.mode == "count" and sep else value
 
     def accounts(self, entries: list[Entry], limit: int = 10) -> str:
         """Kontenliste für Befunde; im Modus count nur die Anzahl."""
@@ -315,8 +356,9 @@ class AdNames:
             return "–"
         people = [e for e in entries if self.is_person(e)]
         if self.mode == "count" and people:
-            others = [self.entry(e) for e in entries if not self.is_person(e)]
-            return ", ".join(others[:limit] + [f"Benutzerkonten: {len(people)}"])
+            others = sorted((self.entry(e) for e in entries if not self.is_person(e)), key=str.lower)
+            more = f" (+{len(others) - limit})" if len(others) > limit else ""
+            return ", ".join(others[:limit]) + more + (", " if others else "") + f"Benutzerkonten: {len(people)}"
         names = sorted((self.entry(e) for e in entries), key=str.lower)
         return ", ".join(names[:limit]) + (f" (+{len(names) - limit})" if len(names) > limit else "")
 

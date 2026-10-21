@@ -14,7 +14,8 @@ from doku_agent import markdown
 from doku_agent.ad_acl import (CONTROL_ACCESS, GENERIC_ALL, GET_CHANGES_ALL, WRITE_DAC, WRITE_OWNER, WRITE_PROP,
                                is_admin, is_broad, is_default, is_write, parse_sd, protected_from_deletion,
                                rights_text, scope_text)
-from doku_agent.connectors.ad import Entry, interval_seconds, parent_dn, rdn
+from doku_agent.connectors.ad import AdError, Entry, interval_seconds, parent_dn, rdn
+from doku_agent.connectors.sysvol import SysvolError
 from doku_agent.context import Context
 from doku_agent.generators import gpo_docs, narrative
 from doku_agent.generators.ad_common import (AREA_LABELS, DES_ONLY, DONT_EXPIRE, DONT_REQ_PREAUTH, FUNCTIONAL_LEVELS,
@@ -270,8 +271,7 @@ def domain_policy(d: Entry) -> list[list]:
         ["Komplexität erforderlich", "ja" if props & 1 else "nein"],
         ["Umkehrbare Verschlüsselung", "ja" if props & 16 else "nein"],
         ["Kontensperrungsschwelle", f"{threshold} Fehlversuche" if threshold else "keine Sperre"],
-        ["Sperrdauer", (_seconds(d.int("lockoutDuration"), "Minuten") if d.int("lockoutDuration") != -0x8000000000000000
-                        else "bis ein Administrator entsperrt") if threshold else "–"],
+        ["Sperrdauer", _lockout(d.int("lockoutDuration")) if threshold else "–"],
         ["Zähler zurücksetzen nach", _seconds(d.int("lockOutObservationWindow"), "Minuten") if threshold else "–"],
     ]
 
@@ -282,50 +282,54 @@ def _pso_seconds(e: Entry, attr: str, unit: str) -> str:
         _seconds(value, unit) if value else "0"
 
 
-def domain_gpo_template(data: AdData):
-    """Sicherheitsvorlage der GPO mit höchster Priorität an der Domäne, die Kerberos-Werte setzt."""
-    entries = gpo_docs.parse_gplink(data.domain.str("gPLink"))
-    for dn, options in reversed(entries):  # Reihenfolge 1 zuerst
-        if options & 1:
+def kerberos_settings(data: AdData) -> list[tuple[str, str, str]]:
+    """Wirksame Kerberos-Werte an der Domäne: je Einstellung die GPO mit der höchsten Priorität (Reihenfolge 1
+    zuerst), ohne deaktivierte Verknüpfungen und GPOs mit deaktivierter Computerkonfiguration. (Schlüssel, Wert, GPO)"""
+    flags = {g.str("cn").upper(): g.int("flags", 0) or 0 for g in data.gpos}
+    found: dict[str, tuple[str, str]] = {}
+    for dn, options in reversed(gpo_docs.parse_gplink(data.domain.str("gPLink"))):
+        guid = gpo_docs.gpo_guid(dn)
+        if options & 1 or flags.get(guid, 0) & 2:
             continue
-        files = data.files.get(gpo_docs.gpo_guid(dn).lower())
-        if files is not None and files.template is not None and files.template.kerberos:
-            return gpo_docs.gpo_name(data, gpo_docs.gpo_guid(dn)), files.template
-    return None, None
+        files = data.files.get(guid.lower())
+        if files is None or files.template is None:
+            continue
+        for key, value in files.template.kerberos.items():
+            found.setdefault(key, (value, gpo_docs.gpo_name(data, guid)))
+    order = list(gpo_docs.KERBEROS)
+    return [(k, v, src) for k, (v, src) in sorted(found.items(), key=lambda kv: order.index(kv[0])
+                                                    if kv[0] in order else 99)]
+
+
+def _lockout(value: int | None) -> str:
+    return "bis ein Administrator entsperrt" if value == -0x8000000000000000 else _seconds(value, "Minuten")
 
 
 def password_page(ctx: Context, data: AdData, names: AdNames) -> tuple[str, list[Block]]:
     domain = markdown.table(["Einstellung", "Wert"], domain_policy(data.domain))
     domain += ("\n\nGilt für alle Domänenkonten ohne feingranulare Richtlinie. Gesetzt wird sie über die GPO an der "
                "Domäne mit höchster Priorität (meist Default Domain Policy); die Werte oben sind die wirksamen.")
-    if ctx.cfg.ad.sysvol and not data.files:  # nur die GPOs an der Domäne lesen
-        try:
-            for dn, _ in gpo_docs.parse_gplink(data.domain.str("gPLink")):
-                guid = gpo_docs.gpo_guid(dn)
-                if guid:
-                    data.files[guid.lower()] = gpo_docs.load_files(ctx, data, guid)
-        except RuntimeError as exc:
-            ctx.log.warning("Kerberos-Richtlinie nicht lesbar (SYSVOL): %s", exc)
-    if data.files:
-        source, template = domain_gpo_template(data)
-        if template is not None:
-            rows = [[gpo_docs.KERBEROS.get(k, (k,))[0], gpo_docs._access_value(k, v)] for k, v in template.kerberos.items()]
-            kerberos = markdown.table(["Einstellung", "Wert"], rows) + f"\n\nQuelle: GPO **{source}**."
-        else:
-            kerberos = "_Keine an der Domäne verknüpfte GPO setzt Kerberos-Werte – es gelten die Windows-Standards._"
+    if ctx.cfg.ad.sysvol:
+        for dn, _ in gpo_docs.parse_gplink(data.domain.str("gPLink")):  # nur die GPOs an der Domäne nachladen
+            guid = gpo_docs.gpo_guid(dn)
+            if guid and guid.lower() not in data.files:  # SYSVOL-Störung bricht den Bereich ab
+                data.files[guid.lower()] = gpo_docs.load_files(ctx, data, guid)
+        rows = [[gpo_docs.KERBEROS.get(k, (k,))[0], gpo_docs._access_value(k, v), src]
+                for k, v, src in kerberos_settings(data)]
+        kerberos = markdown.table(["Einstellung", "Wert", "Quelle (GPO)"], rows) if rows else \
+            "_Keine an der Domäne verknüpfte GPO setzt Kerberos-Werte – es gelten die Windows-Standards._"
     else:
-        kerberos = "_Nicht gelesen (SYSVOL ist aus oder nicht erreichbar)._"
+        kerberos = "_Nicht gelesen (ad.sysvol: false)._"
     rows = []
     for p in sorted(data.psos, key=lambda e: (e.int("msDS-PasswordSettingsPrecedence", 0), e.name.lower())):
-        targets = [names.by_dn[dn.lower()] for dn in p.strs("msDS-PSOAppliesTo") if dn.lower() in names.by_dn]
-        applies = [names.entry(t) for t in targets] + [rdn(dn) for dn in p.strs("msDS-PSOAppliesTo")
-                                                         if dn.lower() not in names.by_dn]
+        names.resolve_dns(p.strs("msDS-PSOAppliesTo"))
+        applies = [names.dn(dn) for dn in p.strs("msDS-PSOAppliesTo")]
         threshold = p.int("msDS-LockoutThreshold", 0) or 0
         rows.append([p.name, p.int("msDS-PasswordSettingsPrecedence"), p.int("msDS-MinimumPasswordLength"),
                      "ja" if p.bool("msDS-PasswordComplexityEnabled") else "nein",
                      p.int("msDS-PasswordHistoryLength"), _pso_seconds(p, "msDS-MaximumPasswordAge", "Tage"),
                      f"{threshold}" if threshold else "keine Sperre",
-                     _seconds(p.int("msDS-LockoutDuration"), "Minuten") if threshold else "–",
+                     _lockout(p.int("msDS-LockoutDuration")) if threshold else "–",
                      "ja" if p.bool("msDS-PasswordReversibleEncryptionEnabled") else "nein",
                      ", ".join(sorted(applies, key=str.lower)) or "niemand"])
     psos = markdown.table(["Richtlinie", "Rangfolge", "Mindestlänge", "Komplexität", "Chronik", "Max. Alter",
@@ -491,7 +495,7 @@ def audit(ctx: Context, data: AdData, names: AdNames) -> dict[str, list[list]]:
             f["gpo"].append([name, "WMI-Filter fehlt"])
         acl = gpo_docs.gpo_acl(g)
         if acl.readable:
-            if gl and not gpo_docs.computers_can_read(acl, data.domain_sid):
+            if gl and gpo_docs.ms16_072(g, acl, data.domain_sid):
                 f["gpo"].append([name, "Computer haben kein Leserecht (MS16-072) – Benutzereinstellungen greifen nicht"])
             broad = [s for s in acl.edit if is_broad(s)]
             if broad:
@@ -639,8 +643,9 @@ def audit(ctx: Context, data: AdData, names: AdNames) -> dict[str, list[list]]:
             f["domain"].append([dc.name, f"{dc.str('operatingSystem')} – ohne Herstellersupport"])
     for t in data.trusts:
         attrs = t.int("trustAttributes", 0) or 0
-        external = not attrs & (WITHIN_FOREST | FOREST_TRANSITIVE)
-        if external and not attrs & QUARANTINED and t.int("trustDirection", 0) & 1:
+        external = not attrs & (WITHIN_FOREST | FOREST_TRANSITIVE) and t.int("trustType", 0) != 3
+        # SID-Filterung schützt diese Domäne, wenn sie dem Partner vertraut (ausgehend)
+        if external and not attrs & QUARANTINED and t.int("trustDirection", 0) & 2:
             f["domain"].append([t.str("trustPartner"), "externe Vertrauensstellung ohne SID-Filterung"])
         if attrs & ENABLE_TGT_DELEGATION:
             f["domain"].append([t.str("trustPartner"), "Delegierung von Kerberos-Tickets über die Vertrauensstellung "
@@ -751,12 +756,16 @@ def document_ad(ctx: Context, areas: list[str] | None = None) -> list[int | None
         if not NEEDS[area] <= data.loaded:
             failed.append(area)
             continue
-        if area == "gpo":
-            all_links = gpo_docs.links(data)
-            for g in data.gpos:
-                results.append(gpo_docs.gpo_page(ctx, data, g, names, all_links))
-        for slug, heading in SECTIONS[area]:
-            results.append(_propose_section(ctx, slug, heading, data, names))
+        try:
+            if area == "gpo":
+                all_links = gpo_docs.links(data)
+                for g in data.gpos:
+                    results.append(gpo_docs.gpo_page(ctx, data, g, names, all_links))
+            for slug, heading in SECTIONS[area]:
+                results.append(_propose_section(ctx, slug, heading, data, names))
+        except (AdError, SysvolError) as exc:  # z.B. DC während des Laufs weg: Bereich auslassen, nicht verfälschen
+            ctx.log.error("Active Directory (%s) abgebrochen: %s", AREA_LABELS[area], exc)
+            failed.append(area)
     if failed:
         raise RuntimeError("Active Directory unvollständig – nicht dokumentiert: " + ", ".join(
             AREA_LABELS[a] for a in failed) + ". Die übrigen Bereiche wurden dokumentiert; Ursache siehe Meldungen oben.")

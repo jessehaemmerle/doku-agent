@@ -251,6 +251,38 @@ nicht aufgelöst. Die GPO-Dateien stammen vom DC, mit dem LDAP verbunden ist, ü
   Directory Changes All“); daher die festen Namen über die GUID.
 - Samba schreibt `MACHINE`/`USER` in Großbuchstaben. Pfade werden ohne Rücksicht auf Groß-/Kleinschreibung erkannt.
 
+**Code-Review** – 16 Punkte, alle behoben und mit Tests in `tests/test_ad.py` abgesichert:
+- Ein Klartext-Kennwort in einem Preferences-Registrierungswert (`DefaultPassword`), in Umgebungsvariablen, INI-Werten,
+  `Registry.pol` oder Sicherheitsoptionen wäre ins Wiki und an das Sprachmodell gegangen. Maskiert wird jetzt auch über
+  den Namen des Werts, nicht nur über den Attributnamen.
+- Eine abgeschnittene `Registry.pol` oder eine UTF-16-Datei ungerader Länge brach den ganzen AD-Lauf ab. Jetzt ist nur
+  diese Datei betroffen (Hinweis auf der GPO-Seite und Befund). Dasselbe gilt für zu große Dateien und Fehler wie
+  „wird gerade gelöscht“; nur ein Verbindungsabbruch lässt den Bereich ausfallen.
+- Im Modus `count` erschienen beim Geltungsbereich einer PSO, bei Mitgliedern lokaler Gruppen, bei „ausführen als“ von
+  Aufgaben und bei Namen in GptTmpl.inf Personennamen. Außerdem lieferte der Wiki-Lint bei PSOs einen anderen Namen als
+  der Job, sodass bei jedem Lint ein Vorschlag entstand. Jetzt werden DNs und Kontonamen über LDAP aufgelöst.
+- Die MS16-072-Prüfung schlug nie an, weil die Organisations-DCs (S-1-5-9) in jeder GPO Leserecht haben. Sie zählen
+  nicht mehr; geprüft wird nur, wenn die GPO Benutzereinstellungen hat.
+- SID-Filterung wurde bei eingehenden statt bei ausgehenden Vertrauensstellungen verlangt; MIT-Bereiche sind
+  ausgenommen.
+- ADMX: Richtlinien nur mit `enabledList`/`disabledList`, das Deaktivieren per `**del.` ohne `disabledValue` und
+  Schalter mit `<falseValue><delete/>` wurden falsch bewertet.
+- Eine PSO-Sperrdauer „bis zur Entsperrung durch einen Administrator“ erschien als „nie“.
+- SYSVOL blieb nach einem Ausfall am ersten DC hängen; jetzt folgt es beim Neuverbinden dem DC der LDAP-Verbindung.
+- Kerberos-Werte kommen je Einstellung aus der GPO mit der höchsten Priorität, ohne deaktivierte Verknüpfungen und
+  ohne GPOs mit deaktivierter Computerkonfiguration.
+- Weitere Korrekturen:
+  - Störungen beim Auflösen von Namen brechen den Bereich ab, statt SIDs auf die Seite zu schreiben.
+  - Die Reihenfolge aller Listen hängt nicht mehr vom DC ab.
+  - Die LDAP-Verbindung wird bei fehlgeschlagener Anmeldung geschlossen.
+  - Große Attribute werden über die gemeldete Bereichsgrenze gelesen.
+  - Die Gruppe „Replikations-Operator“ zählt zu den privilegierten Gruppen.
+
+**Versuch mit qwen3:8b:** Die Beschreibungen zweier GPOs und die Bewertung der Prüfseite bestanden die Faktenprüfung
+im ersten Versuch (250–550 s je Text). Eine Beschreibung hielt „Server - Basis“ für unwirksam: Eine von zwei
+Verknüpfungen war deaktiviert, und die Fakten sagten das nur indirekt. Die Fakten nennen jetzt ausdrücklich, wo die GPO
+wirkt und welcher Teil deaktiviert ist.
+
 ## Fließtext mit Faktenprüfung (21.10.2026)
 
 Grundsatz bleibt: Fakten entstehen deterministisch, das LLM formuliert nur. Neu ist, dass es auf den meisten Seiten

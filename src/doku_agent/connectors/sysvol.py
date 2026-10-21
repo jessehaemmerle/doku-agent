@@ -27,8 +27,9 @@ class SysvolError(RuntimeError):
     pass
 
 
-class SysvolAccessDenied(SysvolError):
-    """Einzelne Datei oder einzelner Ordner nicht lesbar (die Verbindung selbst steht)."""
+class SysvolFileError(SysvolError):
+    """Einzelne Datei oder einzelner Ordner nicht lesbar (Zugriff verweigert, zu groß, wird gerade gelöscht …);
+    die Verbindung selbst steht."""
 
 
 @dataclass
@@ -48,8 +49,11 @@ def _clean(path: str) -> str:
 
 
 class SysvolClient:
-    def __init__(self, cfg: AdConfig, guard: EgressGuard, server: str):
-        self.cfg, self.guard, self.server = cfg, guard, server
+    def __init__(self, cfg: AdConfig, guard: EgressGuard, server):
+        """server: DC-Name oder Funktion, die ihn beim Verbinden liefert (folgt so dem LDAP-DC nach einem Ausfall)."""
+        self.cfg, self.guard = cfg, guard
+        self._server = server
+        self.server = server if isinstance(server, str) else ""
         self._conn = self._session = self._tree = None
         self._lock = threading.RLock()
 
@@ -61,6 +65,7 @@ class SysvolClient:
         from smbprotocol.session import Session
         from smbprotocol.tree import TreeConnect
 
+        self.server = self._server if isinstance(self._server, str) else self._server()
         self.guard.check_host(self.server, "SMB")
         try:
             conn = Connection(uuid.uuid4(), self.server, self.cfg.smb_port, require_signing=True)
@@ -94,7 +99,7 @@ class SysvolClient:
             self._conn = self._session = self._tree = None
 
     def _retry(self, fn):
-        from smbprotocol.exceptions import AccessDenied, SMBConnectionClosed, SMBException
+        from smbprotocol.exceptions import SMBConnectionClosed, SMBException, SMBResponseException
         with self._lock:
             for attempt in (1, 2):
                 tree = self._connect()
@@ -104,8 +109,8 @@ class SysvolClient:
                     self.close()
                     if attempt == 2:
                         raise SysvolError(f"SMB-Verbindung zu {self.server} abgebrochen: {exc}") from exc
-                except AccessDenied as exc:
-                    raise SysvolAccessDenied(f"Zugriff verweigert: {exc}") from exc
+                except SMBResponseException as exc:  # Antwort des Servers zu dieser Datei
+                    raise SysvolFileError(str(exc)) from exc
                 except SMBException as exc:
                     raise SysvolError(f"SYSVOL: {exc}") from exc
 
@@ -128,7 +133,7 @@ class SysvolClient:
             try:
                 size = f.end_of_file
                 if size > MAX_FILE:
-                    raise SysvolError(f"{name}: Datei zu groß ({size} Bytes)")
+                    raise SysvolFileError(f"{name}: Datei zu groß ({size} Bytes)")
                 chunk = max(64 * 1024, min(tree.session.connection.max_read_size, 1024 * 1024))
                 data = bytearray()
                 while len(data) < size:

@@ -94,8 +94,12 @@ class Context:
         from doku_agent.connectors.sysvol import SysvolClient
         if not self.cfg.ad.enabled or not self.cfg.ad.sysvol:
             raise RuntimeError("SYSVOL ist in der Konfiguration deaktiviert (ad.sysvol)")
-        self.ad.root()  # verbindet und legt den DC fest
-        return self._shared("sysvol", lambda: SysvolClient(self.cfg.ad, self.guard, self.ad.server))
+        ad = self.ad
+
+        def server() -> str:  # beim (Neu-)Verbinden: der DC, mit dem LDAP gerade verbunden ist
+            ad.root()
+            return ad.server or (ad.servers[0] if ad.servers else "")
+        return self._shared("sysvol", lambda: SysvolClient(self.cfg.ad, self.guard, server))
 
     @cached_property
     def vcenter(self):

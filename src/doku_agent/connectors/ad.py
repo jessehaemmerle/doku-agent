@@ -134,10 +134,12 @@ class Entry:
     def __init__(self, dn: str, attrs: dict[str, list[bytes]]):
         self.dn = dn
         self.attrs: dict[str, list[bytes]] = {}
+        self.ranges: dict[str, str] = {}  # Attribut -> Ende des gelieferten Bereichs ('*' = letzter Teil)
         for key, values in attrs.items():
             name = key.lower()
-            if ";range=" in name:  # Teilmenge eines großen Attributs (member;range=0-1499)
-                name = name.split(";", 1)[0]
+            if ";range=" in name:  # Teilmenge eines großen Attributs (member;range=0-1499, letzte: …-*)
+                name, _, rng = name.partition(";range=")
+                self.ranges[name] = rng.split("-", 1)[-1]
             self.attrs.setdefault(name, []).extend(values if isinstance(values, list) else [values])
 
     @classmethod
@@ -255,6 +257,13 @@ def bind_message(result: dict) -> str:
     return f"Anmeldung abgelehnt: {text}"
 
 
+def _drop(conn) -> None:
+    try:
+        conn.unbind()
+    except Exception:  # Verbindung war gar nicht offen
+        pass
+
+
 class AdClient:
     def __init__(self, cfg: AdConfig, guard: EgressGuard):
         self.cfg = cfg
@@ -278,17 +287,21 @@ class AdClient:
         conn = ldap3.Connection(server, user=self.cfg.username, password=self.cfg.password,
                                 authentication=ldap3.SIMPLE, auto_referrals=False, raise_exceptions=False,
                                 receive_timeout=max(self.cfg.timeout_s, 60), read_only=True)
+        if not self.cfg.username:
+            raise AdError("ad.username fehlt (Lesekonto als UPN, z.B. svc-doku@corp.example.local)")
         try:
             conn.open()
             if self.cfg.starttls and not conn.start_tls():
                 raise AdError(f"StartTLS an {host}:{self.cfg.ldap_port} fehlgeschlagen: {conn.result}")
+            if not conn.bind():
+                raise AdError(f"LDAP {host}: {bind_message(conn.result)}")
         except ldap3.core.exceptions.LDAPException as exc:
+            _drop(conn)
             msg = str(exc)
             raise AdError(f"LDAP {host}:{self.cfg.ldap_port} nicht erreichbar: {msg}{_tls_hint(msg)}") from exc
-        if not self.cfg.username:
-            raise AdError("ad.username fehlt (Lesekonto als UPN, z.B. svc-doku@corp.example.local)")
-        if not conn.bind():
-            raise AdError(f"LDAP {host}: {bind_message(conn.result)}")
+        except AdError:
+            _drop(conn)
+            raise
         return conn
 
     def _connection(self):
@@ -367,12 +380,11 @@ class AdClient:
             if not found:
                 return values
             raw = found[0]
-            keys = [k for k in raw.attrs if k == attr.lower()]
             values += raw.values(attr)
-            # Das letzte Teilstück endet auf '-*'; Entry hat die Bereichsangabe entfernt, daher über die Anzahl
-            if not keys or len(raw.values(attr)) < 1500:
+            end = raw.ranges.get(attr.lower(), "*")  # ohne Bereichsangabe kam alles auf einmal
+            if end == "*" or not end.isdigit():
                 return values
-            start += len(raw.values(attr))
+            start = int(end) + 1
 
     # --- Grunddaten -------------------------------------------------------------------------
 
@@ -552,6 +564,26 @@ class AdClient:
 
     def primary_group_members(self, rid: int) -> list[Entry]:
         return self.search(self.base, f"(primaryGroupID={int(rid)})", MEMBER_ATTRS)
+
+    def resolve_dns(self, dns: list[str]) -> dict[str, Entry]:
+        """DN (klein) -> Objekt, in Paketen zu 50 (z.B. Geltungsbereich einer PSO)."""
+        out: dict[str, Entry] = {}
+        wanted = sorted({d for d in dns if d})
+        for i in range(0, len(wanted), 50):
+            flt = "(|" + "".join(f"(distinguishedName={escape_value(d)})" for d in wanted[i:i + 50]) + ")"
+            for e in self.search(self.base, flt, ["sAMAccountName", "name", "displayName", "objectClass", "objectSid"]):
+                out[e.dn.lower()] = e
+        return out
+
+    def accounts_by_name(self, names: list[str]) -> dict[str, Entry]:
+        """sAMAccountName (klein) -> Objekt, für Namen statt SIDs in Gruppenrichtlinien."""
+        out: dict[str, Entry] = {}
+        wanted = sorted({n for n in names if n})
+        for i in range(0, len(wanted), 50):
+            flt = "(|" + "".join(f"(sAMAccountName={escape_value(n)})" for n in wanted[i:i + 50]) + ")"
+            for e in self.search(self.base, flt, ["sAMAccountName", "name", "displayName", "objectClass", "objectSid"]):
+                out[e.str("sAMAccountName").lower()] = e
+        return out
 
     def resolve_sids(self, sids: list[str]) -> dict[str, Entry]:
         """SID -> Objekt (Benutzer, Gruppe, Computer) in Paketen zu 50."""
