@@ -38,6 +38,7 @@ class SeqLLM:
     "Eingetragen am 15.01.2026, z.B. für Web (Regel 7, „web-in“); Kontakt anna@firma.at, d.h. IPv4 und 16GB.",
     "Die Maschine ist ein **wichtiger** Server, der über das Netz erreichbar ist.",
     "Die Richtlinie gilt für „allen Cloud-Apps“ und die „Conditional-Access-Richtlinie“ betrifft „IP-Adressen“.",
+    "Sie basiert auf der **Plattform Ubuntu 24.04** und trägt die **IP-Adresse 10.20.0.5/24**.",  # echter Fall
 ])
 def test_belegte_angaben_bestehen(text):
     assert narrative.unverified(text, FACTS) == []
@@ -51,8 +52,10 @@ def test_belegte_angaben_bestehen(text):
     ("Er heißt auch srv02.", "srv02"),
     ("Teil von srv01.firma.local.", "srv01.firma.local"),
     ("Er gehört zur Gruppe „Webfarm-01“.", "Webfarm-01"),
+    ("Die Schnittstelle **ens19,2** ist virtuell.", "ens19,2"),   # verstümmelter Name (echter Fall)
     ("Seit 01.02.2025 im Einsatz.", "01.02.2025"),
     ("Admin ist **max@firma.at**.", "max@firma.at"),
+    ("Insgesamt **4 Befunde**.", "4"),                       # selbst addiert, steht nicht in den Daten
     ("Erreichbar unter 10.20.0.50.", "10.20.0.50"),       # kein Teilstring-Treffer in 10.20.0.5
     ("Er heißt auch srv0.", "srv0"),                        # nicht in srv01
     ("Er läuft mit Ubuntu 24.10.", "24.10"),                # andere Version als 24.04

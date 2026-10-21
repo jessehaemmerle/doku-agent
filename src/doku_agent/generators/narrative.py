@@ -19,7 +19,7 @@ from doku_agent.context import Context
 from doku_agent.generators.common import digest
 from doku_agent.llm import LLMError
 
-VERSION = 2  # erhöhen, wenn sich Prompt oder Prüfung ändern (alle Texte werden dann neu erzeugt)
+VERSION = 3  # erhöhen, wenn sich Prompt oder Prüfung ändern (alle Texte werden dann neu erzeugt)
 RETRY_FALLBACK_DAYS = 7  # eine feste Vorlage wird nach dieser Zeit erneut durch Fließtext zu ersetzen versucht
 
 PROSE_RULES = (
@@ -45,11 +45,10 @@ _TRIM = ".,;:!?()[]{}„“”\"'`»«…*"
 _IPV4 = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?$")
 _HEXCOLON = re.compile(r"^[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,}(?:/\d{1,3})?$", re.I)
 _NUMBER = re.compile(r"^\d+(?:[.,]\d+)?%?$")
-_QUOTED = re.compile(r"[„\"“»`]([^„\"“”`«»\n]{2,80})[“”\"«`]")
-_BOLD = re.compile(r"\*\*([^*\n]{2,80})\*\*")
 _UNIT = re.compile(r"^(\d+(?:[.,]\d+)?)(gb|mb|tb|kb|gib|mib|ghz|mhz|ms|s|h|min|bit|mbit|gbit|x)$")
 _DE_DATE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:t[\d:.]+z?)?$")
+_NAME_NUMBER = re.compile(r"^[a-zäöüß]+(?:[-_][a-zäöüß]+)*[-_]\d+$")
 _BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.M)
 
 
@@ -84,7 +83,7 @@ def _token_numbers(low: str) -> list[str]:
     unit = _UNIT.match(low)
     if _NUMBER.match(low) or unit:
         return [_num(unit.group(1) if unit else low)]
-    if _ISO_DATE.match(low):
+    if _ISO_DATE.match(low) or re.fullmatch(r"v?\d+(?:\.\d+){2,}", low):  # Datum, Version 10.0.19045
         return [_num(n) for n in re.findall(r"\d+", low)]
     return [_num(part) for part in re.split(r"[-/:]", low) if _NUMBER.match(part)]
 
@@ -99,13 +98,9 @@ def unverified(text: str, facts: str) -> list[str]:
         if claim not in bad:
             bad.append(claim)
 
-    # Zitierte und fett gesetzte Ausdrücke nur, wenn sie wie technische Namen aussehen – das Modell setzt auch
-    # allgemeine Begriffe in Anführungszeichen („IP-Adressen“), die in den Daten anders formuliert sind
-    claims = [c for c in _QUOTED.findall(text) + _BOLD.findall(text) if re.search(r"[\d._@/]", c)]
-    for match in claims:
-        claim = match.strip()
-        if claim and not _present(claim.lower(), hay):
-            miss(claim)
+    # Wortgruppen in Anführungszeichen oder Fettdruck werden nicht als Ganzes verglichen (das Modell formuliert
+    # „Plattform Ubuntu 24.04“ statt „Plattform: Ubuntu 24.04“); ihre technischen Bestandteile prüft die
+    # Wortprüfung unten einzeln.
     for raw in text.split():
         token = raw.strip(_TRIM)
         low = token.lower()
@@ -126,6 +121,9 @@ def unverified(text: str, facts: str) -> list[str]:
         elif any(c.isdigit() for c in low):
             # zusammengesetzt (srv01, ubuntu-24.04, 04:00, v7.4.5): als Ganzes oder Teil für Teil belegt
             if _present(low, hay):
+                continue
+            if _NAME_NUMBER.match(low):  # webfarm-01, vlan-20: Name mit Nummer nur als Ganzes
+                miss(token)
                 continue
             for part in re.split(r"[-/:]", low):
                 part = part.strip(_TRIM)
