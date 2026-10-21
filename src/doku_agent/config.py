@@ -265,6 +265,33 @@ class SwitchDevice(BaseModel):
     snmp: SnmpCredentials | None = None  # abweichende Zugangsdaten für diesen Switch
 
 
+LldpCapability = Literal["other", "repeater", "bridge", "wlanAccessPoint", "router", "telephone",
+                         "docsisCableDevice", "stationOnly"]
+
+
+class LldpDiscoveryConfig(BaseModel):
+    """Weitere Switches über LLDP finden: von switches.devices aus den Nachbarn folgen."""
+    enabled: bool = False
+    # Nur Management-Adressen in diesen Netzen werden abgefragt (Allowlist für SNMP); leer = keine Suche
+    networks: list[str] = Field(default_factory=list)
+    max_depth: int = 5  # Ebenen ab den eingetragenen Switches
+    max_switches: int = 100  # insgesamt, inklusive der eingetragenen
+    require_capabilities: list[LldpCapability] = Field(default_factory=lambda: ["bridge"])
+    skip_capabilities: list[LldpCapability] = Field(
+        default_factory=lambda: ["wlanAccessPoint", "telephone", "stationOnly"])
+
+    @field_validator("networks")
+    @classmethod
+    def _networks(cls, value: list[str]) -> list[str]:
+        import ipaddress
+        for net in value:
+            try:
+                ipaddress.ip_network(net, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"switches.lldp_discovery.networks: {net!r} ist kein Netz (z.B. 10.0.0.0/16)") from exc
+        return value
+
+
 class SwitchesConfig(BaseModel):
     enabled: bool = False
     snmp: SnmpCredentials = Field(default_factory=SnmpCredentials)
@@ -273,6 +300,7 @@ class SwitchesConfig(BaseModel):
     # Endgeräte über die MAC-Tabelle verkabeln (nur Ports mit genau so vielen bekannten MACs, keine Uplinks)
     mac_table: bool = True
     mac_table_max_macs: int = 1
+    lldp_discovery: LldpDiscoveryConfig = Field(default_factory=LldpDiscoveryConfig)
 
 
 class EmbeddingsConfig(BaseModel):

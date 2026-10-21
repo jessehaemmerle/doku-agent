@@ -155,9 +155,17 @@ switches:
     version: "2c"              # oder "3"
     community: ${SNMP_COMMUNITY:-}
     # v3: user, auth_protocol (sha256 …), auth_key, priv_protocol (aes …), priv_key
-  devices:
-    - host: 10.0.0.2           # nur diese Hosts werden per SNMP (UDP 161) abgefragt
+  devices:                     # beliebig viele; je Switch optional name, netbox_site und eigene snmp-Angaben
+    - host: 10.0.0.2           # Beispiel – durch eure Switch-Adressen ersetzen
       name: ""                 # leer = sysName
+    # - host: 10.0.0.3
+  lldp_discovery:              # weitere Switches über LLDP finden (von den Einträgen oben aus)
+    enabled: false
+    networks: []               # Pflicht: nur Management-Adressen in diesen Netzen abfragen, z.B. [10.0.0.0/24]
+    max_depth: 5               # Ebenen ab den eingetragenen Switches
+    max_switches: 100
+    require_capabilities: [bridge]                             # LLDP-Fähigkeit eines Switches
+    skip_capabilities: [wlanAccessPoint, telephone, stationOnly]  # APs und Telefone nicht abfragen
   netbox_role: switch
   mac_table: true              # Endgeräte über die MAC-Tabelle verkabeln …
   mac_table_max_macs: 1        # … nur an Ports mit so vielen gelernten MACs (keine Uplinks)

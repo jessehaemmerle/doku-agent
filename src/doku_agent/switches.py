@@ -1,5 +1,9 @@
 """Switches per SNMP: Switch und Ports in Netbox, Kabel aus LLDP-Nachbarn und MAC-Tabelle.
 
+Optional werden weitere Switches über LLDP gefunden: Von den eingetragenen Switches aus folgt der Agent
+Nachbarn, die per LLDP die Fähigkeit "Bridge" melden, über deren Management-Adresse – aber nur innerhalb
+der freigegebenen Netze (switches.lldp_discovery.networks).
+
 Pro Switch ein Vorschlag mit einzeln freigebbaren Änderungen:
 - Gerät (falls es fehlt) und fehlende Ports (eine Änderung für alle neuen Ports),
 - je Port ein Kabel: über LLDP (Nachbar sendet LLDP) oder über die MAC-Tabelle, aber nur an Ports
@@ -11,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-from doku_agent.config import SwitchDevice
+from doku_agent.config import LldpDiscoveryConfig, SwitchDevice
 from doku_agent.connectors.snmp import SnmpClient, SnmpData
 from doku_agent.context import Context
 from doku_agent.discovery import netbox_serial, netbox_slug, norm_mac, norm_serial, short_name
@@ -66,6 +70,41 @@ class Neighbor:
     port_desc: str = ""
 
 
+# LldpSystemCapabilitiesMap (BITS): Bit 0 ist das höchstwertige Bit des ersten Oktetts
+CAPABILITIES = ["other", "repeater", "bridge", "wlanAccessPoint", "router", "telephone", "docsisCableDevice",
+                "stationOnly"]
+
+
+def capabilities(value) -> set[str] | None:
+    """LLDP-Fähigkeiten als Namen; None, wenn der Nachbar keine meldet."""
+    if not isinstance(value, bytes) or not value:
+        return None
+    return {name for i, name in enumerate(CAPABILITIES)
+            if i // 8 < len(value) and value[i // 8] >> (7 - i % 8) & 1}
+
+
+def management_ips(table: dict) -> dict[tuple, str]:
+    """(timeMark, lokaler Port, Nachbar-Index) -> IPv4-Management-Adresse aus dem Index der
+    lldpRemManAddrTable (Familie 1 = IPv4, danach Länge und Oktette; manche Geräte ohne Länge)."""
+    out: dict[tuple, str] = {}
+    for index in table:
+        if len(index) < 5 or index[3] != 1:
+            continue
+        rest = index[4:]
+        octets = rest[1:] if len(rest) == 5 and rest[0] == 4 else rest
+        if len(octets) == 4 and all(0 <= o <= 255 for o in octets):
+            out.setdefault(index[:3], ".".join(str(o) for o in octets))
+    return out
+
+
+@dataclass
+class Peer:
+    """LLDP-Nachbar für die Suche nach weiteren Switches (unabhängig von der Port-Zuordnung)."""
+    sys_name: str
+    capabilities: set[str] | None
+    mgmt_ip: str = ""
+
+
 @dataclass
 class SwitchInfo:
     host: str
@@ -77,6 +116,7 @@ class SwitchInfo:
     ports: dict[int, Port] = field(default_factory=dict)
     neighbors: list[Neighbor] = field(default_factory=list)
     fdb: dict[int, set[str]] = field(default_factory=dict)
+    peers: list[Peer] = field(default_factory=list)
 
 
 def parse(host: str, data: SnmpData, name: str = "") -> SwitchInfo:
@@ -115,9 +155,12 @@ def parse(host: str, data: SnmpData, name: str = "") -> SwitchInfo:
             return by_name[desc]
         return num if num in info.ports else None
 
+    mgmt = management_ips(t.get("lldpRemManAddrIfSubtype", {}))
     for index, sys_name in t.get("lldpRemSysName", {}).items():
         if len(index) < 3:
             continue
+        info.peers.append(Peer(short_name(_text(sys_name)), capabilities(t.get("lldpRemSysCapEnabled", {}).get(index)),
+                               mgmt.get(index[:3], "")))
         ifindex = local_port(index[1])
         if ifindex is None:
             continue
@@ -375,17 +418,69 @@ def propose_switch(ctx: Context, sw: SwitchDevice, data: SnmpData | None = None,
     )
 
 
+def skip_reason(peer: Peer, disc: LldpDiscoveryConfig, guard) -> str:
+    """Warum ein LLDP-Nachbar nicht abgefragt wird ('' = abfragen)."""
+    if peer.capabilities is None:
+        return "meldet keine LLDP-Fähigkeiten"
+    if peer.capabilities & set(disc.skip_capabilities):
+        return "laut LLDP " + ", ".join(sorted(peer.capabilities & set(disc.skip_capabilities)))
+    if not set(disc.require_capabilities) <= peer.capabilities:
+        return "laut LLDP kein " + ", ".join(disc.require_capabilities)
+    if not peer.mgmt_ip:
+        return "keine IPv4-Management-Adresse per LLDP"
+    if not guard.allows_snmp(peer.mgmt_ip):
+        return f"{peer.mgmt_ip} liegt außerhalb von lldp_discovery.networks"
+    return ""
+
+
 def sync_switches(ctx: Context, host: str = "") -> list[int | None]:
+    """Eingetragene Switches abgleichen; mit lldp_discovery auch die per LLDP gefundenen (Breitensuche)."""
+    cfg = ctx.cfg.switches
+    disc = cfg.lldp_discovery
+    crawl = disc.enabled and not host and bool(disc.networks)
+    if disc.enabled and not disc.networks and not host:
+        ctx.log.warning("LLDP-Suche ist an, aber lldp_discovery.networks ist leer – es werden nur die "
+                        "eingetragenen Switches abgefragt.")
     view = _NetboxView(ctx.netbox)
-    results, failed = [], []
-    for sw in ctx.cfg.switches.devices:
-        if host and sw.host != host:
-            continue
+    queue = [(sw, 0) for sw in cfg.devices if not host or sw.host == host]
+    known_hosts = {sw.host.lower() for sw, _ in queue}
+    done_names: set[str] = set()
+    results, failed, found, skipped = [], [], [], {}
+    while queue:
+        sw, depth = queue.pop(0)
         try:
-            results.append(propose_switch(ctx, sw, view=view))
+            data = SnmpClient(sw.host, sw.snmp or cfg.snmp, ctx.guard).collect()
+            info = parse(sw.host, data, sw.name)
+            # Wiedererkennung über den sysName (so melden ihn die Nachbarn), auch wenn ein eigener Name gesetzt ist
+            names = {info.name.lower(), short_name(_text(data.scalars.get("sysName"))).lower()} - {""}
+            if names & done_names:  # derselbe Switch unter einer weiteren Adresse
+                ctx.log.info("Switch %s ist %s – bereits abgeglichen", sw.host, info.name)
+                continue
+            done_names |= names
+            results.append(propose_switch(ctx, sw, data=data, view=view))
         except Exception as exc:
             ctx.log.error("Switch %s: %s", sw.host, exc)
             failed.append(sw.host)
+            continue
+        if not crawl or depth >= disc.max_depth:
+            continue
+        for peer in info.peers:
+            if peer.sys_name.lower() in done_names or (peer.mgmt_ip and peer.mgmt_ip.lower() in known_hosts):
+                continue
+            reason = skip_reason(peer, disc, ctx.guard)
+            if reason:
+                skipped.setdefault(peer.sys_name or peer.mgmt_ip or "?", reason)
+                continue
+            if len(known_hosts) >= disc.max_switches:
+                skipped.setdefault(peer.sys_name, f"Grenze von {disc.max_switches} Switches erreicht")
+                continue
+            known_hosts.add(peer.mgmt_ip.lower())
+            found.append(f"{peer.sys_name or peer.mgmt_ip} ({peer.mgmt_ip}, über {info.name})")
+            queue.append((SwitchDevice(host=peer.mgmt_ip, netbox_site=sw.netbox_site), depth + 1))
+    if crawl:
+        ctx.log.info("LLDP-Suche: %s weitere Switches gefunden%s", len(found), ": " + "; ".join(found) if found else "")
+        for name, reason in sorted(skipped.items()):
+            ctx.log.info("LLDP-Nachbar %s nicht abgefragt: %s", name, reason)
     if failed and not results:  # None (nichts zu tun) zählt als erfolgreich
         raise RuntimeError("Kein Switch abgleichbar: " + ", ".join(failed))
     return results

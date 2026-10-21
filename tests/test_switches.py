@@ -160,12 +160,17 @@ def test_job_succeeds_when_one_switch_is_in_sync_and_another_fails(env, monkeypa
     ctx, nbf, sw, nodes = env
     ctx.cfg.switches.devices = [sw, SwitchDevice(host="10.0.0.9")]
 
-    def fake_propose(ctx, s, view=None):
-        if s.host == "10.0.0.9":
-            raise RuntimeError("Zeitüberschreitung")
-        return None  # nichts zu tun
+    class FakeSnmp:
+        def __init__(self, host, creds, guard):
+            self.host = host
 
-    monkeypatch.setattr(switches, "propose_switch", fake_propose)
+        def collect(self, tables=None):
+            if self.host == "10.0.0.9":
+                raise RuntimeError("Zeitüberschreitung")
+            return switch_data()
+
+    monkeypatch.setattr(switches, "SnmpClient", FakeSnmp)
+    monkeypatch.setattr(switches, "propose_switch", lambda ctx, s, data=None, view=None: None)  # nichts zu tun
     assert switches.sync_switches(ctx) == [None]
 
 
@@ -205,3 +210,126 @@ def test_check_lists_each_switch(ctx):
     ctx.guard = EgressGuard.from_config(ctx.cfg)  # Switch-Hosts kommen aus der Konfiguration auf die Allowlist
     ok, message = {name: (ok, msg) for name, ok, msg in run_checks(ctx)}["Switch 10.0.0.2 (SNMP)"]
     assert ok is False and "keine SNMP-Community gesetzt" in message
+
+
+
+# --- LLDP-Suche nach weiteren Switches -----------------------------------------------
+
+BRIDGE, BRIDGE_AP, PHONE = b"\x20\x00", b"\x30\x00", b"\x04\x00"  # Bits: bridge, bridge+wlanAP, telephone
+
+
+def lldp_switch(name: str, peers: list[tuple[str, bytes | None, str]]) -> SnmpData:
+    """Minimaler Switch: ein Port je Nachbar; peers = (sysName, Fähigkeiten, Management-IP)."""
+    d = SnmpData(scalars={"sysName": name.encode(), "sysDescr": b"Testswitch"})
+    t = d.tables
+    t["ifName"] = {(i,): f"Gi1/0/{i}".encode() for i in range(1, len(peers) + 1)}
+    t["ifType"] = {(i,): 6 for i in range(1, len(peers) + 1)}
+    t["lldpRemSysName"], t["lldpRemSysCapEnabled"], t["lldpRemManAddrIfSubtype"] = {}, {}, {}
+    for i, (peer, caps, ip) in enumerate(peers, 1):
+        t["lldpRemSysName"][(0, i, 1)] = peer.encode()
+        if caps is not None:
+            t["lldpRemSysCapEnabled"][(0, i, 1)] = caps
+        if ip:
+            t["lldpRemManAddrIfSubtype"][(0, i, 1, 1, 4, *map(int, ip.split(".")))] = 2
+    return d
+
+
+TOPOLOGY = {
+    "10.0.0.2": lldp_switch("sw-core01", [("sw-access02", BRIDGE, "10.0.0.3"), ("ap-lobby", BRIDGE_AP, "10.0.0.50"),
+                                          ("phone-12", PHONE, "10.0.0.60"), ("sw-extern", BRIDGE, "192.168.99.2"),
+                                          ("sw-ohne-ip", BRIDGE, ""), ("unbekannt", None, "10.0.0.70")]),
+    "10.0.0.3": lldp_switch("sw-access02", [("sw-core01", BRIDGE, "10.0.0.2"), ("sw-etage3", BRIDGE, "10.0.0.4")]),
+    "10.0.0.4": lldp_switch("sw-etage3", [("sw-access02", BRIDGE, "10.0.0.3")]),
+}
+
+
+@pytest.fixture
+def crawl(env, monkeypatch):
+    from doku_agent import switches
+    from doku_agent.egress import EgressGuard
+
+    ctx, nbf, sw, nodes = env
+    asked = []
+
+    class FakeSnmp:
+        def __init__(self, host, creds, guard):
+            if not guard.allows_snmp(host):
+                raise EgressBlocked(host)
+            self.host = host
+
+        def collect(self, tables=None):
+            asked.append(self.host)
+            return TOPOLOGY[self.host]
+
+    monkeypatch.setattr(switches, "SnmpClient", FakeSnmp)
+    disc = ctx.cfg.switches.lldp_discovery
+    disc.enabled, disc.networks = True, ["10.0.0.0/24"]
+    ctx.guard = EgressGuard.from_config(ctx.cfg)
+    return ctx, asked
+
+
+def test_lldp_parsing_of_capabilities_and_management_address():
+    from doku_agent.switches import capabilities, management_ips
+
+    assert capabilities(BRIDGE) == {"bridge"} and capabilities(BRIDGE_AP) == {"bridge", "wlanAccessPoint"}
+    assert capabilities(b"") is None and capabilities(None) is None
+    assert management_ips({(0, 3, 1, 1, 4, 10, 0, 0, 3): 2, (0, 4, 1, 1, 10, 0, 0, 4): 2,  # mit und ohne Länge
+                           (0, 5, 1, 2, 16, *range(16)): 2}) == {(0, 3, 1): "10.0.0.3", (0, 4, 1): "10.0.0.4"}
+
+
+def test_lldp_discovery_follows_switches_within_allowed_networks(crawl, caplog):
+    from doku_agent import switches
+
+    ctx, asked = crawl
+    caplog.set_level("INFO")
+    results = switches.sync_switches(ctx)
+    assert asked == ["10.0.0.2", "10.0.0.3", "10.0.0.4"]  # Breitensuche, jeder Switch einmal
+    names = {ctx.store.get_proposal(r).payload["target"]["name"] for r in results if r}
+    assert names == {"sw-core01", "sw-access02", "sw-etage3"}
+    log = caplog.text
+    assert "LLDP-Suche: 2 weitere Switches gefunden" in log
+    assert "ap-lobby nicht abgefragt: laut LLDP wlanAccessPoint" in log
+    assert "phone-12 nicht abgefragt: laut LLDP telephone" in log
+    assert "sw-extern nicht abgefragt: 192.168.99.2 liegt außerhalb von lldp_discovery.networks" in log
+    assert "sw-ohne-ip nicht abgefragt: keine IPv4-Management-Adresse per LLDP" in log
+    assert "unbekannt nicht abgefragt: meldet keine LLDP-Fähigkeiten" in log
+
+
+def test_lldp_discovery_respects_depth_limit_and_single_host(crawl):
+    from doku_agent import switches
+
+    ctx, asked = crawl
+    ctx.cfg.switches.lldp_discovery.max_depth = 1
+    switches.sync_switches(ctx)
+    assert asked == ["10.0.0.2", "10.0.0.3"]
+    asked.clear()
+    switches.sync_switches(ctx, host="10.0.0.2")  # einzelner Switch: keine Suche
+    assert asked == ["10.0.0.2"]
+
+
+def test_snmp_allowlist_covers_discovery_networks_only(ctx):
+    from doku_agent.egress import EgressGuard
+
+    ctx.cfg.switches.enabled = True
+    ctx.cfg.switches.devices = [SwitchDevice(host="10.0.0.2")]
+    ctx.cfg.switches.lldp_discovery.enabled = True
+    ctx.cfg.switches.lldp_discovery.networks = ["10.0.0.0/24"]
+    guard = EgressGuard.from_config(ctx.cfg)
+    assert guard.allows_snmp("10.0.0.99") and not guard.allows_snmp("10.0.1.1") and not guard.allows_snmp("sw.extern")
+    with pytest.raises(EgressBlocked):  # HTTP-Allowlist bleibt unberührt
+        guard.check(httpx.Request("GET", "https://10.0.0.99/"))
+
+
+def test_seed_with_own_name_is_not_queried_again_via_lldp(crawl, monkeypatch):
+    from doku_agent import switches
+    from doku_agent.egress import EgressGuard
+
+    ctx, asked = crawl
+    # per DNS-Name eingetragen: die von sw-access02 gemeldete 10.0.0.2 ist dadurch kein bekannter Host
+    monkeypatch.setitem(TOPOLOGY, "core.firma.local", TOPOLOGY["10.0.0.2"])
+    ctx.cfg.switches.devices = [SwitchDevice(host="core.firma.local", name="core-zentrale")]
+    ctx.guard = EgressGuard.from_config(ctx.cfg)
+    results = switches.sync_switches(ctx)
+    assert asked == ["core.firma.local", "10.0.0.3", "10.0.0.4"]  # sw-core01 wird am sysName wiedererkannt
+    names = [ctx.store.get_proposal(r).payload["target"]["name"] for r in results if r]
+    assert names.count("core-zentrale") == 1 and "sw-core01" not in names

@@ -7,6 +7,7 @@ ein Konfigurationsfehler noch eine Weiterleitung Daten an fremde Dienste leaken.
 
 from __future__ import annotations
 
+import ipaddress
 from urllib.parse import urlsplit
 
 import httpx
@@ -43,14 +44,31 @@ def allowed_hosts(cfg: Config) -> set[str]:
     return hosts
 
 
+def snmp_networks(cfg: Config) -> list[str]:
+    """Netze, in denen per LLDP gefundene Switches abgefragt werden dürfen (nur SNMP)."""
+    disc = cfg.switches.lldp_discovery
+    return list(disc.networks) if cfg.switches.enabled and disc.enabled else []
+
+
 class EgressGuard:
-    def __init__(self, hosts: set[str], trust_env: bool = False):
+    def __init__(self, hosts: set[str], trust_env: bool = False, snmp_networks=()):
         self.hosts = frozenset(hosts)
         self.trust_env = trust_env
+        self.snmp_networks = tuple(ipaddress.ip_network(n, strict=False) for n in snmp_networks)
 
     @classmethod
     def from_config(cls, cfg: Config) -> "EgressGuard":
-        return cls(allowed_hosts(cfg), trust_env=cfg.egress.trust_env)
+        return cls(allowed_hosts(cfg), trust_env=cfg.egress.trust_env, snmp_networks=snmp_networks(cfg))
+
+    def allows_snmp(self, host: str) -> bool:
+        """SNMP-Ziel erlaubt: eingetragener Host oder IP-Adresse in einem freigegebenen Netz."""
+        if host.lower() in self.hosts:
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return any(ip in net for net in self.snmp_networks)
 
     def check(self, request: httpx.Request) -> None:
         host = (request.url.host or "").lower()

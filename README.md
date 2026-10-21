@@ -165,6 +165,22 @@ einmal ab.
 
 Zum Gegentest vom Docker-Host aus: `snmpget -v2c -c <community> <switch> 1.3.6.1.2.1.1.5.0`.
 
+**Weitere Switches per LLDP finden** (`switches.lldp_discovery`): Von den eingetragenen Switches aus folgt der
+Agent ihren LLDP-Nachbarn und fragt diese über die Management-Adresse ab, die der Nachbar per LLDP mitteilt. Das
+läuft als Breitensuche über bis zu `max_depth` Ebenen und höchstens `max_switches` Switches.
+
+Abgefragt wird ein Nachbar nur, wenn alle Bedingungen erfüllt sind:
+- Er meldet die Fähigkeit „Bridge“.
+- Er ist weder WLAN-AP noch Telefon.
+- Er hat eine IPv4-Management-Adresse.
+- Die Adresse liegt in `networks`. Die Netze erweitern die SNMP-Allowlist, und nur für SNMP. Ohne Netze findet keine
+  Suche statt.
+
+Gefundene Switches nutzen die Standard-Zugangsdaten `switches.snmp` und den Netbox-Standort des Switches, über den sie
+gefunden wurden. Derselbe Switch unter einer zweiten Adresse wird über den sysName erkannt und nur einmal abgeglichen.
+Das Job-Protokoll listet die gefundenen Switches und für jeden übersprungenen Nachbarn den Grund. Mit
+`--param host=…` wird nur dieser eine Switch abgeglichen, ohne Suche.
+
 Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml` einkommentieren und
 `verify_tls: /config/ca.pem` setzen.
 

@@ -1,6 +1,7 @@
 """SNMP (v2c/v3, nur lesend) für Switches: System, Interfaces, LLDP-Nachbarn und MAC-Tabelle.
 
-Abgefragt werden nur Hosts, die in switches.devices stehen (Allowlist wie bei HTTP). Verwendete MIBs:
+Abgefragt werden nur Hosts aus switches.devices und – bei der LLDP-Suche – Adressen in lldp_discovery.networks
+(Allowlist wie bei HTTP). Verwendete MIBs:
 SNMPv2-MIB (System), IF-MIB, ENTITY-MIB (Seriennummer/Modell), LLDP-MIB (IEEE 802.1AB),
 BRIDGE-MIB und Q-BRIDGE-MIB (MAC-Tabelle).
 """
@@ -38,6 +39,9 @@ TABLES = {
     "lldpRemPortId": "1.0.8802.1.1.2.1.4.1.1.7",
     "lldpRemPortDesc": "1.0.8802.1.1.2.1.4.1.1.8",
     "lldpRemSysName": "1.0.8802.1.1.2.1.4.1.1.9",
+    "lldpRemSysCapEnabled": "1.0.8802.1.1.2.1.4.1.1.12",
+    # Management-Adressen der Nachbarn: die Adresse steckt im Index (Familie, Länge, Oktette)
+    "lldpRemManAddrIfSubtype": "1.0.8802.1.1.2.1.4.2.1.3",
     "dot1dBasePortIfIndex": "1.3.6.1.2.1.17.1.4.1.2",
     "dot1dTpFdbPort": "1.3.6.1.2.1.17.4.3.1.2",
     "dot1qTpFdbPort": "1.3.6.1.2.1.17.7.1.2.2.1.2",
@@ -72,8 +76,8 @@ def _value(v):
 
 class SnmpClient:
     def __init__(self, host: str, creds: SnmpCredentials, guard: EgressGuard):
-        if host.lower() not in guard.hosts:
-            raise EgressBlocked(f"SNMP zu {host!r} blockiert (nicht in der Allowlist)")
+        if not guard.allows_snmp(host):
+            raise EgressBlocked(f"SNMP zu {host!r} blockiert (nicht in der Allowlist bzw. lldp_discovery.networks)")
         self.host, self.creds = host, creds
 
     def _check_credentials(self) -> None:
