@@ -436,6 +436,10 @@ def skip_reason(peer: Peer, disc: LldpDiscoveryConfig, guard) -> str:
 def sync_switches(ctx: Context, host: str = "") -> list[int | None]:
     """Eingetragene Switches abgleichen; mit lldp_discovery auch die per LLDP gefundenen (Breitensuche)."""
     cfg = ctx.cfg.switches
+    if not cfg.enabled:
+        raise RuntimeError("Switches sind in der Konfiguration deaktiviert (switches.enabled: false)"
+                           + (" – die config.yaml wurde aber nach dem Start geändert: Agent neu starten "
+                              "(docker compose restart agent)" if ctx.cfg.changed_on_disk() else ""))
     disc = cfg.lldp_discovery
     crawl = disc.enabled and not host and bool(disc.networks)
     if disc.enabled and not disc.networks and not host:

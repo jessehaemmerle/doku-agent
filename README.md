@@ -75,6 +75,11 @@ docker compose exec agent doku-agent run wiki_index   # Suchindex für Fragen an
 ```
 
 Danach ist die Oberfläche unter <http://127.0.0.1:8080> erreichbar (Benutzer `admin`, Passwort aus `WEB_PASSWORD`).
+
+**Nach Änderungen an der `config.yaml`:** `docker compose restart agent`. `docker compose up -d` startet den Agent nicht
+neu, wenn sich nur die `config.yaml` geändert hat. Der laufende Dienst (Weboberfläche, Zeitplan) arbeitet dann mit der
+alten Fassung weiter, während `docker compose exec agent doku-agent …` die neue liest. Der Agent erkennt das:
+`check` meldet es unter „Konfiguration“, und jeder Job schreibt eine Warnung ins Protokoll.
 Für Zugriff aus dem LAN die Port-Bindung in `docker-compose.yml` anpassen.
 
 ### Zugänge einrichten

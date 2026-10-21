@@ -66,3 +66,33 @@ def test_redirects_are_not_followed():
 
     client = EgressGuard({"wiki.test"}).client(transport=httpx.MockTransport(handler))
     assert client.get("https://wiki.test/").status_code == 302
+
+
+def test_config_changed_after_start_is_reported(tmp_path, fake_wiki):
+    import httpx
+
+    from doku_agent.config import load_config
+    from doku_agent.context import Context
+    from doku_agent.jobs import run_now
+    from doku_agent.web.app import run_checks
+    from doku_agent.wiki import WikiClient
+    from tests.conftest import FakeLLM
+
+    path = tmp_path / "config.yaml"
+    path.write_text(f"general: {{data_dir: {tmp_path / 'data'}}}\nwiki: {{url: https://wiki.test, api_key: k}}\n"
+                    "web: {password: geheim}\nswitches: {enabled: false, devices: [{host: 10.253.100.243}]}\n")
+    ctx = Context(load_config(path))
+    ctx.__dict__["wiki"] = WikiClient(ctx.cfg.wiki, ctx.guard, transport=httpx.MockTransport(fake_wiki.handler))
+    ctx.__dict__["llm"] = FakeLLM()
+    assert not ctx.cfg.changed_on_disk()
+    assert {n: ok for n, ok, _ in run_checks(ctx)}["Konfiguration"] is True
+
+    # Switches eingeschaltet, aber der laufende Dienst wurde nicht neu gestartet
+    path.write_text(path.read_text().replace("enabled: false", "enabled: true"))
+    assert ctx.cfg.changed_on_disk()
+    ok, message = {n: (ok, msg) for n, ok, msg in run_checks(ctx)}["Konfiguration"]
+    assert ok is False and "docker compose restart agent" in message
+    job_id, ok = run_now(ctx, "switches")
+    log = ctx.store.get_job(job_id).log
+    assert not ok and "nach dem Start des Agents geändert" in log
+    assert "Switches sind in der Konfiguration deaktiviert" in log and "Agent neu starten" in log

@@ -151,6 +151,9 @@ def run_job(base: Context, job_id: int, name: str, params: dict) -> bool:
     ok = False
     try:
         job_log.info("Start: %s", JOBS[name][0])
+        if base.cfg.changed_on_disk():
+            job_log.warning("Die config.yaml wurde nach dem Start des Agents geändert – dieser Job läuft noch mit der "
+                            "alten Fassung. Änderungen gelten erst nach 'docker compose restart agent'.")
         result = JOBS[name][1](ctx, params)
         if isinstance(result, list):
             created = [r for r in result if r]

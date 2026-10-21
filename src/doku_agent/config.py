@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -388,9 +389,22 @@ class Config(BaseModel):
     web: WebConfig = Field(default_factory=WebConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)
 
+    _source: tuple[Path, str] | None = PrivateAttr(default=None)  # (Datei, Hash beim Laden)
+
     @property
     def db_path(self) -> Path:
         return self.general.data_dir / "doku-agent.sqlite3"
+
+    def changed_on_disk(self) -> bool:
+        """Wurde die config.yaml nach dem Laden geändert? Der laufende Dienst arbeitet dann noch mit der alten
+        Fassung (ein Bind-Mount löst bei 'docker compose up -d' keinen Neustart aus)."""
+        if self._source is None:
+            return False
+        path, digest = self._source
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest() != digest
+        except OSError:
+            return False
 
     @property
     def upload_dir(self) -> Path:
@@ -401,9 +415,12 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     path = Path(path or os.environ.get("DOKU_AGENT_CONFIG", "config.yaml"))
     if not path.exists():
         raise ConfigError(f"Konfigurationsdatei {path} nicht gefunden (siehe config.example.yaml)")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    content = path.read_bytes()
+    raw = yaml.safe_load(content.decode("utf-8")) or {}
     try:
-        return Config.model_validate(_expand_env(raw))
+        cfg = Config.model_validate(_expand_env(raw))
+        cfg._source = (path, hashlib.sha256(content).hexdigest())
+        return cfg
     except ConfigError:
         raise
     except Exception as exc:  # pydantic.ValidationError mit allen Details

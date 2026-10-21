@@ -381,6 +381,13 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
             raise RuntimeError(f"Modell {model} fehlt (docker compose --profile setup run --rm ollama-pull)")
         return f"Modell {model} vorhanden"
 
+    def config_current():
+        if ctx.cfg.changed_on_disk():
+            raise RuntimeError("die config.yaml wurde nach dem Start geändert – der laufende Agent nutzt noch die alte "
+                               "Fassung. Neu starten: docker compose restart agent")
+        return "geladene Fassung entspricht der Datei"
+
+    check("Konfiguration", config_current)
     check("Sprachmodell (Ollama)", llm)
     if ctx.cfg.embeddings.enabled:
         check("Embedding-Modell (Ollama)", embeddings)
