@@ -8,6 +8,7 @@ Es werden ausschließlich GET-Anfragen an Graph gestellt; Inhalte gehen nie an e
 
 from __future__ import annotations
 
+import json
 import time
 from urllib.parse import urlsplit
 
@@ -33,6 +34,41 @@ POLICY_PATHS = {
     "konfigurationsprofile": "/v1.0/deviceManagement/deviceConfigurations",
     "settings-catalog": "/beta/deviceManagement/configurationPolicies",  # nur in /beta
 }
+# Anwendungsberechtigung je Graph-Pfad (erster Treffer gilt) – für verständliche 403-Meldungen und 'check'
+PERMISSIONS = (
+    ("/deviceManagement/managedDevices", "DeviceManagementManagedDevices.Read.All"),
+    ("/deviceManagement/", "DeviceManagementConfiguration.Read.All"),
+    ("/deviceAppManagement/", "DeviceManagementApps.Read.All"),
+    ("/groups", "Group.Read.All"),
+)
+# Bereiche aus intune.include -> Pfad für die Probe-Abfrage in 'doku-agent check'
+PROBES = {
+    "compliance": "/v1.0/deviceManagement/deviceCompliancePolicies",
+    "configurations": "/v1.0/deviceManagement/deviceConfigurations",
+    "settings_catalog": "/beta/deviceManagement/configurationPolicies",
+    "apps": "/v1.0/deviceAppManagement/mobileApps",
+    "groups": "/v1.0/groups",
+}
+
+
+def required_permission(url: str) -> str:
+    path = urlsplit(url).path
+    return next((perm for prefix, perm in PERMISSIONS if prefix in path), "")
+
+
+def graph_message(resp: httpx.Response) -> str:
+    """Fehlertext von Graph; Intune verpackt ihn als JSON-String mit 'Message' und Operation-ID."""
+    try:
+        msg = resp.json()["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        return resp.text[:300]
+    try:
+        msg = json.loads(msg).get("Message", msg)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return str(msg).split(" - Operation ID")[0].strip()[:300]
+
+
 GROUP_FIELDS = "id,displayName,description,groupTypes,membershipRule,securityEnabled,mailEnabled"
 GROUP_CACHE_SECONDS = 3600  # Gruppen werden in einem Lauf oft mehrfach gebraucht, ändern sich aber nachts
 
@@ -44,6 +80,7 @@ class IntuneClient:
         self.login = guard.client("https://login.microsoftonline.com", transport=transport, timeout=60)
         self._token: str | None = None
         self._expires = 0.0
+        self._issued = 0.0
         self._groups: dict[str, tuple[float, dict]] = {}
 
     def _auth(self) -> str:
@@ -58,7 +95,8 @@ class IntuneClient:
             raise IntuneError(f"Graph-Anmeldung fehlgeschlagen: HTTP {resp.status_code} {resp.text[:300]}")
         data = resp.json()
         self._token = data["access_token"]
-        self._expires = time.monotonic() + float(data.get("expires_in", 3600))
+        self._issued = time.monotonic()
+        self._expires = self._issued + float(data.get("expires_in", 3600))
         return self._token
 
     def _request(self, url: str, params: dict | None = None, headers: dict | None = None,
@@ -72,6 +110,18 @@ class IntuneClient:
             retry_after = resp.headers.get("Retry-After", "10")
             time.sleep(min(int(retry_after) if retry_after.isdigit() else 10, 60))
             return self._request(url, params, headers, retries - 1)
+        if resp.status_code == 403:
+            # Neu erteilte Berechtigungen stehen erst in einem neuen Token -> beim nächsten Aufruf neu anmelden
+            # (höchstens einmal pro Minute, falls die Berechtigung weiterhin fehlt)
+            if time.monotonic() - self._issued > 60:
+                self._token = None
+            perm = required_permission(url)
+            if perm:
+                raise IntuneError(
+                    f"Graph GET {urlsplit(url).path}: HTTP 403 – der App-Registrierung fehlt die "
+                    f"Anwendungsberechtigung {perm}. In Entra ID unter App-Registrierungen › API-Berechtigungen "
+                    f"als Microsoft-Graph-Anwendungsberechtigung (nicht delegiert) hinzufügen und die "
+                    f"Administratorzustimmung erteilen. (Graph: {graph_message(resp)})", 403)
         if resp.status_code != 200:
             raise IntuneError(f"Graph GET {url}: HTTP {resp.status_code} {resp.text[:300]}", resp.status_code)
         return resp
@@ -89,6 +139,21 @@ class IntuneClient:
                 raise IntuneError(f"Unerwarteter nextLink-Host: {next_link}")
             url, query = next_link, None
         return out
+
+    def missing_permissions(self, areas) -> dict[str, list[str]]:
+        """Fehlende Anwendungsberechtigung -> betroffene Bereiche (je Bereich eine Probe-Abfrage)."""
+        missing: dict[str, list[str]] = {}
+        for area in areas:
+            path = PROBES.get(area)
+            if not path:
+                continue
+            try:
+                self._request(path, {"$top": "1", "$select": "id"} if area == "groups" else None)
+            except IntuneError as exc:
+                if exc.status != 403:
+                    raise
+                missing.setdefault(required_permission(path), []).append(area)
+        return missing
 
     # --- Geräte ----------------------------------------------------------
 

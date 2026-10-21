@@ -95,6 +95,19 @@ Benutzer. In `config.yaml` muss `netbox.site` auf einen existierenden Standort z
 erteilen und `intune.enabled: true` setzen. Der Agent stellt ausschließlich GET-Anfragen. Die Daten werden nur
 gelesen und lokal verarbeitet.
 
+| Bereich (`intune.include`) | Anwendungsberechtigung |
+|---|---|
+| Discovery (Geräte) | `DeviceManagementManagedDevices.Read.All` |
+| `compliance`, `configurations`, `settings_catalog` | `DeviceManagementConfiguration.Read.All` |
+| `apps` | `DeviceManagementApps.Read.All` |
+| `groups` bzw. Gruppennamen | `Group.Read.All` |
+
+`doku-agent check` (bzw. *Status*) fragt jeden Bereich einmal ab und nennt fehlende Berechtigungen. Häufigste Ursachen
+für „HTTP 403“: die Berechtigung wurde als *delegiert* statt als *Anwendung* hinzugefügt, oder die
+Administratorzustimmung fehlt (Spalte *Status* in den API-Berechtigungen). Ist ein Bereich nicht lesbar, dokumentiert
+der Intune-Job die übrigen trotzdem und meldet am Ende einen Fehler; die Gruppen-Übersicht wird dann ausgelassen,
+weil ihr Zuweisungen fehlen würden. Nach erteilter Zustimmung holt der Agent beim nächsten Lauf selbst ein neues Token.
+
 **FortiGate (optional)** – *System › Administratoren › REST-API-Admin* anlegen, mit einem Admin-Profil, das alles
 nur lesen darf, und den Agent-Host als *Trusted Host* eintragen. Das Token als `FORTIGATE_TOKEN` in `.env`, die
 Firewall unter `fortigate.devices` eintragen und `fortigate.enabled: true` setzen. Getestet ist das Schema von

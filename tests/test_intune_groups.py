@@ -46,12 +46,16 @@ ASSIGNMENTS = {
 class FakeGraph:
     def __init__(self):
         self.requests = []
+        self.forbidden: set[str] = set()  # Pfad-Präfixe ohne Berechtigung (403 wie Graph)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path
         if request.url.host == "login.microsoftonline.com":
             return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if any(path.startswith(f) for f in self.forbidden):
+            return httpx.Response(403, json={"error": {"code": "Forbidden", "message": "Application is not "
+                                                       "authorized to perform this operation."}})
         if path.endswith("/$count"):
             assert request.headers["consistencylevel"] == "eventual"
             gid, kind = path.split("/")[3], path.split("/")[5].removeprefix("microsoft.graph.")
@@ -59,6 +63,8 @@ class FakeGraph:
             if value is None:  # Microsoft-365-Gruppen können keine Untergruppen haben
                 return httpx.Response(400, json={"error": {"code": "Request_UnsupportedQuery"}})
             return httpx.Response(200, text=str(value), headers={"content-type": "text/plain"})
+        if path == "/v1.0/groups":
+            return httpx.Response(200, json={"value": [{"id": g} for g in GROUPS][:1]})
         if path.startswith("/v1.0/groups/"):
             return httpx.Response(200, json=GROUPS[path.split("/")[3]])
         if path.endswith("/assignments"):
@@ -125,3 +131,42 @@ def test_single_policy_fetch_and_not_found(ctx, graph):
     with pytest.raises(IntuneError) as exc:
         ctx.intune.policy("compliance", "geloescht")
     assert exc.value.status == 404
+
+
+def test_missing_permission_is_named_and_other_areas_are_still_documented(ctx, graph, caplog):
+    graph.forbidden = {"/v1.0/deviceManagement/deviceCompliancePolicies"}
+    with pytest.raises(RuntimeError, match="nicht lesbar: Compliance-Richtlinien"):
+        intune_docs.document_intune(ctx)
+    titles = {p.payload["title"] for p in ctx.store.list_proposals("pending")}
+    assert {"Intune: BitLocker", "Intune: Apps"} <= titles
+    assert "Intune: Gruppen und Zuweisungen" not in titles  # wäre ohne die Compliance-Zuweisungen falsch
+    assert "fehlt die Anwendungsberechtigung DeviceManagementConfiguration.Read.All" in caplog.text
+
+
+def test_new_token_after_permission_was_granted(ctx, graph):
+    from doku_agent.connectors.intune import IntuneError
+
+    graph.forbidden = {"/v1.0/deviceAppManagement/"}
+    ctx.intune._auth()
+    ctx.intune._issued -= 120  # Token ist schon älter
+    with pytest.raises(IntuneError) as exc:
+        ctx.intune.mobile_apps()
+    assert exc.value.status == 403 and "DeviceManagementApps.Read.All" in str(exc.value)
+    assert "(Graph: Application is not authorized to perform this operation.)" in str(exc.value)
+    graph.forbidden.clear()  # Administratorzustimmung erteilt
+    logins = sum(r.url.host == "login.microsoftonline.com" for r in graph.requests)
+    assert ctx.intune.mobile_apps()[0]["displayName"] == "7-Zip"
+    assert sum(r.url.host == "login.microsoftonline.com" for r in graph.requests) == logins + 1
+
+
+def test_check_lists_missing_permissions(ctx, graph):
+    from doku_agent.web.app import run_checks
+
+    graph.forbidden = {"/v1.0/deviceManagement/deviceCompliancePolicies", "/v1.0/deviceManagement/deviceConfigurations",
+                       "/v1.0/groups"}
+    result = {name: (ok, msg) for name, ok, msg in run_checks(ctx)}["Intune-Berechtigungen"]
+    assert result[0] is False
+    assert "DeviceManagementConfiguration.Read.All für compliance, configurations" in result[1]
+    assert "Group.Read.All für groups" in result[1]
+    graph.forbidden.clear()
+    assert {name: ok for name, ok, _ in run_checks(ctx)}["Intune-Berechtigungen"] is True

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from doku_agent import markdown
+from doku_agent.connectors.intune import IntuneError
 from doku_agent.context import Context
 from doku_agent.generators.common import STYLE_RULES, cached, digest, mask_value
 from doku_agent.pages import Block, PageDraft, propose_page
@@ -191,24 +192,43 @@ def document_policy(ctx: Context, category: str, policy: dict, usage: Usage | No
     return _policy_page(ctx, policy, category, flatten(policy), odata_type(policy), usage)
 
 
+AREA_LABELS = {"compliance": "Compliance-Richtlinien", "configurations": "Konfigurationsprofile",
+               "settings_catalog": "Settings Catalog", "apps": "Apps", "groups": "Gruppen-Übersicht"}
+
+
 def document_intune(ctx: Context) -> list[int | None]:
+    """Alle Bereiche aus intune.include. Ist ein Bereich nicht lesbar (z.B. fehlende Berechtigung), werden die
+    übrigen trotzdem dokumentiert; der Job meldet am Ende einen Fehler."""
     include = set(ctx.cfg.intune.include)
     intune = ctx.intune
     usage: Usage = {}
-    results = []
-    if "compliance" in include:
-        for pol in intune.compliance_policies():
-            results.append(document_policy(ctx, "compliance", pol, usage))
-    if "configurations" in include:
-        for pol in intune.device_configurations():
-            results.append(document_policy(ctx, "konfigurationsprofile", pol, usage))
-    if "settings_catalog" in include:
-        for pol in intune.settings_catalog_policies():
-            results.append(document_policy(ctx, "settings-catalog", pol, usage))
-    if "apps" in include:
-        results.append(document_apps(ctx, usage))
-    if "groups" in include:
-        results.append(document_groups(ctx, usage))
+    results, failed = [], []
+
+    def area(key: str, run) -> None:
+        if key not in include:
+            return
+        try:
+            run()
+        except IntuneError as exc:
+            ctx.log.error("%s übersprungen: %s", AREA_LABELS[key], exc)
+            failed.append(key)
+
+    def policies(category: str, fetch):
+        return lambda: results.extend(document_policy(ctx, category, pol, usage) for pol in fetch())
+
+    area("compliance", policies("compliance", intune.compliance_policies))
+    area("configurations", policies("konfigurationsprofile", intune.device_configurations))
+    area("settings_catalog", policies("settings-catalog", intune.settings_catalog_policies))
+    area("apps", lambda: results.append(document_apps(ctx, usage)))
+    if "groups" in include and failed:
+        # ohne die Zuweisungen der fehlenden Bereiche wäre die Übersicht falsch
+        ctx.log.warning("Gruppen-Übersicht übersprungen: Zuweisungen aus %s fehlen.",
+                        ", ".join(AREA_LABELS[k] for k in failed))
+    else:
+        area("groups", lambda: results.append(document_groups(ctx, usage)))
+    if failed:
+        raise RuntimeError(f"Intune unvollständig – nicht lesbar: {', '.join(AREA_LABELS[k] for k in failed)}. "
+                           f"Die übrigen Bereiche wurden dokumentiert; Ursache siehe Meldungen oben.")
     return results
 
 
