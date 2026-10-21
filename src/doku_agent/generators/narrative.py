@@ -19,7 +19,7 @@ from doku_agent.context import Context
 from doku_agent.generators.common import digest
 from doku_agent.llm import LLMError
 
-VERSION = 1  # erhöhen, wenn sich Prompt oder Prüfung ändern (alle Texte werden dann neu erzeugt)
+VERSION = 2  # erhöhen, wenn sich Prompt oder Prüfung ändern (alle Texte werden dann neu erzeugt)
 RETRY_FALLBACK_DAYS = 7  # eine feste Vorlage wird nach dieser Zeit erneut durch Fließtext zu ersetzen versucht
 
 PROSE_RULES = (
@@ -99,8 +99,9 @@ def unverified(text: str, facts: str) -> list[str]:
         if claim not in bad:
             bad.append(claim)
 
-    # Zitierte Namen immer, fett gesetzte nur, wenn sie wie technische Namen aussehen
-    claims = _QUOTED.findall(text) + [b for b in _BOLD.findall(text) if re.search(r"[\d._@/-]", b)]
+    # Zitierte und fett gesetzte Ausdrücke nur, wenn sie wie technische Namen aussehen – das Modell setzt auch
+    # allgemeine Begriffe in Anführungszeichen („IP-Adressen“), die in den Daten anders formuliert sind
+    claims = [c for c in _QUOTED.findall(text) + _BOLD.findall(text) if re.search(r"[\d._@/]", c)]
     for match in claims:
         claim = match.strip()
         if claim and not _present(claim.lower(), hay):

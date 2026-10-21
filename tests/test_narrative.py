@@ -37,6 +37,7 @@ class SeqLLM:
     "**srv01** läuft mit Ubuntu 24.04 und 16 GB Arbeitsspeicher unter 10.20.0.5/24.",
     "Eingetragen am 15.01.2026, z.B. für Web (Regel 7, „web-in“); Kontakt anna@firma.at, d.h. IPv4 und 16GB.",
     "Die Maschine ist ein **wichtiger** Server, der über das Netz erreichbar ist.",
+    "Die Richtlinie gilt für „allen Cloud-Apps“ und die „Conditional-Access-Richtlinie“ betrifft „IP-Adressen“.",
 ])
 def test_belegte_angaben_bestehen(text):
     assert narrative.unverified(text, FACTS) == []
@@ -49,7 +50,7 @@ def test_belegte_angaben_bestehen(text):
     ("Der Webserver lauscht auf Port 443.", "443"),
     ("Er heißt auch srv02.", "srv02"),
     ("Teil von srv01.firma.local.", "srv01.firma.local"),
-    ("Er gehört zur Gruppe „Webfarm“.", "Webfarm"),
+    ("Er gehört zur Gruppe „Webfarm-01“.", "Webfarm-01"),
     ("Seit 01.02.2025 im Einsatz.", "01.02.2025"),
     ("Admin ist **max@firma.at**.", "max@firma.at"),
     ("Erreichbar unter 10.20.0.50.", "10.20.0.50"),       # kein Teilstring-Treffer in 10.20.0.5
