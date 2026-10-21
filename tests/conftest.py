@@ -185,6 +185,12 @@ class FakeLLM:
         return text
 
 
+@pytest.fixture(autouse=True)
+def _no_graph_pause(monkeypatch):
+    """Wiederholungen nach 429/5xx ohne echte Wartezeit."""
+    monkeypatch.setattr("doku_agent.connectors.graph._pause", lambda seconds: None)
+
+
 @pytest.fixture
 def fake_wiki():
     return FakeWiki()

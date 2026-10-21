@@ -155,6 +155,9 @@ def fetch(ctx: Context, groups: set[str]) -> tuple[EntraData, dict[str, str]]:
     load("methods", methods)
     load("tenant", tenant)
     load("roles", roles)
+    for note in client.notes:
+        ctx.log.warning(note)
+    client.notes.clear()
     if "ca" in groups and "roles" not in groups:
         data.role_definitions = role_names(ctx)
     return data, errors

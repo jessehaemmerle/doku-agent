@@ -28,8 +28,13 @@ PERMISSIONS = (
     ("/users", "User.Read.All"),
     ("/groups", "Group.Read.All"),
 )
+SERVER_ERRORS = (500, 502, 503, 504)
 GROUP_FIELDS = "id,displayName,description,groupTypes,membershipRule,securityEnabled,mailEnabled"
 GROUP_CACHE_SECONDS = 3600  # Gruppen werden in einem Lauf oft mehrfach gebraucht, ändern sich aber nachts
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 class GraphError(RuntimeError):
@@ -41,6 +46,13 @@ class GraphError(RuntimeError):
 def required_permission(url: str) -> str:
     path = urlsplit(url).path
     return next((perm for prefix, perm in PERMISSIONS if prefix in path), "")
+
+
+def request_id(resp: httpx.Response) -> str:
+    try:
+        return (resp.json().get("error", {}).get("innerError") or {}).get("request-id", "")
+    except (ValueError, AttributeError):
+        return resp.headers.get("request-id", "")
 
 
 def graph_message(resp: httpx.Response) -> str:
@@ -93,8 +105,16 @@ class GraphClient:
             raise GraphError(f"Graph nicht erreichbar: {exc}") from exc
         if resp.status_code == 429 and retries > 0:  # Drosselung durch Graph
             retry_after = resp.headers.get("Retry-After", "10")
-            time.sleep(min(int(retry_after) if retry_after.isdigit() else 10, 60))
+            _pause(min(int(retry_after) if retry_after.isdigit() else 10, 60))
             return self._request(url, params, headers, retries - 1)
+        if resp.status_code in SERVER_ERRORS and retries > 1:  # vorübergehende Störung: kurz warten, erneut
+            _pause(2 * (4 - retries))
+            return self._request(url, params, headers, retries - 1)
+        if resp.status_code in SERVER_ERRORS:
+            raise GraphError(
+                f"Graph GET {urlsplit(url).path}: HTTP {resp.status_code} – Fehler bei Microsoft (Serverseite), keine "
+                f"fehlende Berechtigung; auch nach Wiederholung. (Graph: {graph_message(resp)}"
+                + (f"; request-id {request_id(resp)}" if request_id(resp) else "") + ")", resp.status_code)
         if resp.status_code == 403:
             # Neu erteilte Berechtigungen stehen erst in einem neuen Token -> beim nächsten Aufruf neu anmelden
             # (höchstens einmal pro Minute, falls die Berechtigung weiterhin fehlt)

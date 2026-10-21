@@ -126,6 +126,17 @@ möglich). Zusätzliche **Anwendungsberechtigungen** (nicht delegiert), danach A
 `entra.enabled: true` setzen und unter `entra.breakglass` die Notfallkonten eintragen (UPN oder Objekt-ID), damit die
 Prüfung sie kennt. `doku-agent check` zeigt in „Entra-Berechtigungen“, was noch fehlt.
 
+**HTTP 500 von Graph:** Das ist ein Fehler auf Microsofts Seite, keine fehlende Berechtigung; die wäre ein 403.
+Der Agent wiederholt solche Anfragen mit kurzer Pause.
+
+Für Conditional Access ist berichtet, dass v1.0 an Richtlinien mit Vorschau-Funktionen scheitert, beta aber nicht.
+Antwortet v1.0 dort weiter mit 5xx, liest der Agent eine Stunde lang über beta. Das Job-Protokoll und `check`
+weisen darauf hin.
+
+Bleibt der Fehler auch über beta bestehen, mit Graph Explorer oder
+`Get-MgBetaIdentityConditionalAccessPolicy` gegenprüfen und die request-id aus der Meldung an den Microsoft-Support
+geben.
+
 **FortiGate (optional)** – *System › Administratoren › REST-API-Admin* anlegen, mit einem Admin-Profil, das alles
 nur lesen darf, und den Agent-Host als *Trusted Host* eintragen. Das Token als `FORTIGATE_TOKEN` in `.env`, die
 Firewall unter `fortigate.devices` eintragen und `fortigate.enabled: true` setzen. Getestet ist das Schema von

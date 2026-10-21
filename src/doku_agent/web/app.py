@@ -383,7 +383,8 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
         check("Intune (Graph)", lambda: f"{len(ctx.intune.managed_devices())} verwaltete Geräte")
         check("Intune-Berechtigungen", intune_permissions)
     if ctx.cfg.entra.enabled:
-        check("Entra ID (Graph)", lambda: f"{len(ctx.entra.ca_policies())} Conditional-Access-Richtlinien")
+        check("Entra ID (Graph)", lambda: f"{len(ctx.entra.ca_policies())} Conditional-Access-Richtlinien" + (
+            " (über Graph beta – v1.0 liefert einen Serverfehler bei Microsoft)" if ctx.entra.ca_via_beta else ""))
         check("Entra-Berechtigungen", entra_permissions)
     if ctx.cfg.fortigate.enabled:
         for dev in ctx.cfg.fortigate.devices:

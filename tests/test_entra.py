@@ -128,6 +128,7 @@ class FakeEntraGraph:
         self.unlicensed: set[str] = set()  # Pfad-Präfixe ohne Lizenz (400)
         self.security_defaults = False
         self.policies = copy.deepcopy(POLICIES)
+        self.server_error: dict[str, int] = {}  # Pfad-Präfix -> wie oft noch HTTP 500 (-1 = immer)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -135,6 +136,14 @@ class FakeEntraGraph:
         if request.url.host == "login.microsoftonline.com":
             return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
         assert request.method == "GET"
+        for prefix, left in self.server_error.items():
+            if path.startswith(prefix) and left:
+                self.server_error[prefix] = left - 1 if left > 0 else left
+                return httpx.Response(500, json={"error": {"code": "Internal Server Error", "message": "There was an "
+                                      "internal server error while processing the request. Error ID: x",
+                                      "innerError": {"request-id": "rid-123"}}})
+        if path.startswith("/beta/"):  # beta liefert dasselbe wie v1.0 (Obermenge)
+            path = "/v1.0/" + path[len("/beta/"):]
         if any(path.startswith(f) for f in self.forbidden):
             return httpx.Response(403, json={"error": {"code": "Authorization_RequestDenied",
                                                        "message": "Insufficient privileges to complete the operation."}})
@@ -387,3 +396,33 @@ def test_legacy_trusted_ips_link_text_and_transient_pim_errors(ctx, graph):
     ctx.__dict__["entra"].http._transport = httpx.MockTransport(flaky)
     data, errors = entra_docs.fetch(ctx, {"roles"})
     assert "roles" in errors and "roles" not in data.loaded
+
+
+def test_server_error_is_retried(ctx, graph):
+    graph.server_error = {"/v1.0/identity/conditionalAccess/policies": 2}  # zweimal 500, dann ok
+    assert len(ctx.entra.ca_policies()) == 4 and not ctx.entra.ca_via_beta
+
+
+def test_persistent_server_error_on_v1_falls_back_to_beta(ctx, graph, caplog):
+    from doku_agent.web.app import run_checks
+
+    graph.server_error = {"/v1.0/identity/conditionalAccess/": -1}
+    pages = _pages(ctx, entra_docs.document_entra(ctx, ["conditional_access"]))
+    assert "identitaet/entra/conditional-access/mfa-fuer-alle" in pages
+    assert "über Graph beta gelesen, weil v1.0 mit HTTP 500" in caplog.text and "rid-123" in caplog.text
+    assert any(r.url.path.startswith("/beta/identity/conditionalAccess/policies") for r in graph.requests)
+    checks = {name: (ok, msg) for name, ok, msg in run_checks(ctx)}
+    assert checks["Entra ID (Graph)"] == (True, "4 Conditional-Access-Richtlinien (über Graph beta – v1.0 liefert "
+                                                "einen Serverfehler bei Microsoft)")
+    assert checks["Entra-Berechtigungen"][0] is True
+
+
+def test_server_error_message_says_it_is_not_a_permission_problem(ctx, graph):
+    from doku_agent.connectors.graph import GraphError
+
+    graph.server_error = {"/v1.0/policies/authorizationPolicy": -1}
+    with pytest.raises(GraphError) as exc:
+        ctx.entra.authorization_policy()
+    assert exc.value.status == 500
+    assert "Fehler bei Microsoft (Serverseite), keine fehlende Berechtigung" in str(exc.value)
+    assert "request-id rid-123" in str(exc.value)

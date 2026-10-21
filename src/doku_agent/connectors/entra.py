@@ -36,6 +36,10 @@ PROBES = {
 CACHE_SECONDS = 3600
 
 
+def _server_error(exc: GraphError) -> bool:
+    return exc.status is not None and exc.status >= 500
+
+
 def unavailable(exc: GraphError) -> bool:
     """Dauerhaft nicht verfügbar (Lizenz, Berechtigung, Endpunkt) statt vorübergehend gestört (429, 5xx)."""
     return exc.status is not None and 400 <= exc.status < 500 and exc.status != 429
@@ -49,23 +53,57 @@ class EntraClient(GraphClient):
                          cfg.client_secret or intune.client_secret, guard, transport)
         self.cfg = cfg
         self._users: dict[str, tuple[float, dict]] = {}
+        self._ca_beta_until = 0.0
+        self.notes: list[str] = []  # Hinweise für das Job-Protokoll (z.B. Ausweichen auf beta)
         self._apps: dict[str, dict | None] = {}
         self._members: dict[str, set[str] | None] = {}
 
     def missing_permissions(self, areas) -> dict[str, list[str]]:
-        return self._missing({a: PROBES[a] for a in areas if a in PROBES})
+        probes = {a: PROBES[a] for a in areas if a in PROBES}
+        if "conditional_access" in probes and self.ca_via_beta:
+            path, params = probes["conditional_access"]
+            probes["conditional_access"] = (path.replace("/v1.0/", "/beta/", 1), params)
+        try:
+            return self._missing(probes)
+        except GraphError as exc:
+            if "conditional_access" not in probes or not _server_error(exc) or self.ca_via_beta:
+                raise
+            self._use_beta(exc)
+            return self.missing_permissions(areas)
 
     # --- Conditional Access ---------------------------------------------------
+    # Graph v1.0 scheitert bei manchen Mandanten mit HTTP 500 an Conditional Access (berichtet für Richtlinien mit
+    # Funktionen, die es nur in beta gibt). Dann wird für eine Stunde über beta gelesen; das Schema dort ist eine
+    # Obermenge, die Auswertung bleibt gleich.
+
+    @property
+    def ca_via_beta(self) -> bool:
+        return time.monotonic() < self._ca_beta_until
+
+    def _use_beta(self, exc: GraphError) -> None:
+        self._ca_beta_until = time.monotonic() + 3600
+        self.notes.append(f"Conditional Access wird über Graph beta gelesen, weil v1.0 mit HTTP {exc.status} "
+                          f"antwortet (Fehler bei Microsoft). Ursprüngliche Meldung: {exc}")
+
+    def _ca(self, suffix: str, single: bool = False):
+        for version in (("beta",) if self.ca_via_beta else ("v1.0", "beta")):
+            path = f"/{version}/identity/conditionalAccess/{suffix}"
+            try:
+                return self._get(path) if single else self._all(path)
+            except GraphError as exc:
+                if version == "beta" or not _server_error(exc):
+                    raise
+                self._use_beta(exc)
 
     def ca_policies(self) -> list[dict]:
-        return self._all("/v1.0/identity/conditionalAccess/policies")
+        return self._ca("policies")
 
     def ca_policy(self, policy_id: str) -> dict:
         """Gelöschte Richtlinien liefern GraphError mit status 404."""
-        return self._get(f"/v1.0/identity/conditionalAccess/policies/{policy_id}")
+        return self._ca(f"policies/{policy_id}", single=True)
 
     def named_locations(self) -> list[dict]:
-        return self._all("/v1.0/identity/conditionalAccess/namedLocations")
+        return self._ca("namedLocations")
 
     def auth_strengths(self) -> list[dict]:
         return self._all("/v1.0/policies/authenticationStrengthPolicies")
