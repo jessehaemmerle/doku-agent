@@ -261,6 +261,36 @@ def test_paged_search_ignores_referrals_and_missing_base(tmp_path):
     assert client.search("CN=Missing,DC=x", "(objectClass=*)", ["name"]) == []
 
 
+class RecordConn:
+    """ldap3-Verbindung, die Attributliste und Controls jeder Suche mitschreibt (ein Ergebnis, keine Seiten)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def search(self, base, flt, search_scope, attributes, controls, paged_size, paged_cookie):
+        self.calls.append({"base": base, "attributes": list(attributes), "controls": controls})
+        self.response = [{"type": "searchResEntry", "dn": base, "raw_attributes": {"cn": [b"x"]}}]
+        self.result = {"result": 0}
+
+
+def test_adcs_requests_security_descriptor_with_sd_flags(tmp_path):
+    """Regressionsschutz: Vorlagen- und ZS-Suche fordern nTSecurityDescriptor mit SD-Flags an (sonst keine ESC-Prüfung)."""
+    cfg = make_config(tmp_path, ad={"enabled": True, "domain": "corp.example.test", "username": "u@x"})
+    client = AdClient(cfg.ad, EgressGuard.from_config(cfg))
+    client._root = {"configurationnamingcontext": CFG_NC, "defaultnamingcontext": BASE,
+                    "rootdomainnamingcontext": BASE}
+    conn = RecordConn()
+    client._conn = conn
+    from ldap3.protocol.microsoft import security_descriptor_control
+    expect = str(security_descriptor_control(sdflags=0x05))  # OWNER + DACL (ohne SACL)
+    for fetch in (client.cert_templates, client.enrollment_services):
+        conn.calls.clear()
+        fetch()
+        call = conn.calls[-1]
+        assert "nTSecurityDescriptor" in call["attributes"], call["attributes"]
+        assert call["controls"] and str(call["controls"]) == expect
+
+
 def test_egress_allows_only_configured_dcs(tmp_path):
     cfg = make_config(tmp_path, ad={"enabled": True, "domain": "corp.example.test", "servers": ["DC1.corp.example.test"]})
     assert "dc1.corp.example.test" in allowed_hosts(cfg) and "corp.example.test" not in allowed_hosts(cfg)
@@ -501,6 +531,27 @@ class FakeAd:
     def resolve_sids(self, sids):
         known = {e.sid(): e for e in [self.helpdesk, self.gg, *self._groups.values()]}
         return {s: known[s] for s in sids if s in known}
+
+    def groups_of(self, dn):
+        return []
+
+    def enrollment_services(self):
+        return []
+
+    def cert_templates(self):
+        return []
+
+    def nt_auth_certificates(self):
+        return None
+
+    def pki_oids(self):
+        return []
+
+    def dns_zones(self):
+        return []
+
+    def dns_records(self, zone_dn):
+        return []
 
     def close(self):
         self.closed += 1

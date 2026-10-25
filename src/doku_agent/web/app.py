@@ -443,6 +443,11 @@ def run_checks(ctx: Context) -> list[tuple[str, bool, str]]:
         check("AD-Leserechte", ad_rights)
         if ctx.cfg.ad.sysvol:
             check("Active Directory (SYSVOL)", ad_sysvol)
+        if "certificates" in ctx.cfg.ad.include:
+            check("AD-Zertifikatsdienste", lambda: f"{len(ctx.ad.enrollment_services())} Zertifizierungsstelle(n), "
+                  f"{len(ctx.ad.cert_templates())} Vorlagen lesbar")
+        if "dns" in ctx.cfg.ad.include:
+            check("AD-DNS", lambda: f"{len(ctx.ad.dns_zones())} DNS-Zone(n) lesbar")
     if ctx.cfg.fortigate.enabled:
         for dev in ctx.cfg.fortigate.devices:
             check(f"FortiGate {dev.name}", lambda dev=dev: fortigate(dev))

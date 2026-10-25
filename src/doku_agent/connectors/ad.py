@@ -562,6 +562,10 @@ class AdClient:
     def direct_members(self, group_dn: str) -> list[str]:
         return [v.decode("utf-8", "replace") for v in self.ranged(group_dn, "member")]
 
+    def groups_of(self, dn: str) -> list[Entry]:
+        """Alle Gruppen, in denen das Objekt Mitglied ist (auch verschachtelt, ohne primäre Gruppe)."""
+        return self.search(self.base, f"(member:{IN_CHAIN}:={escape_value(dn)})", ["objectSid", "sAMAccountName"])
+
     def primary_group_members(self, rid: int) -> list[Entry]:
         return self.search(self.base, f"(primaryGroupID={int(rid)})", MEMBER_ATTRS)
 
@@ -584,6 +588,51 @@ class AdClient:
             for e in self.search(self.base, flt, ["sAMAccountName", "name", "displayName", "objectClass", "objectSid"]):
                 out[e.str("sAMAccountName").lower()] = e
         return out
+
+    # --- Zertifikatsdienste (AD CS) und DNS, beide im Configuration- bzw. Domänen-NC ----------------
+
+    def pki_container(self) -> str:
+        return f"CN=Public Key Services,CN=Services,{self.config}"
+
+    def cert_templates(self) -> list[Entry]:
+        return self.search(f"CN=Certificate Templates,{self.pki_container()}",
+                           "(objectClass=pKICertificateTemplate)", [
+                               "cn", "displayName", "msPKI-Certificate-Name-Flag", "msPKI-Enrollment-Flag",
+                               "msPKI-RA-Signature", "msPKI-RA-Application-Policies", "pKIExtendedKeyUsage",
+                               "msPKI-Certificate-Application-Policy", "msPKI-Certificate-Policy",
+                               "msPKI-Template-Schema-Version", "msPKI-Cert-Template-OID", "pKIExpirationPeriod",
+                               "revision", "whenChanged", "nTSecurityDescriptor"], scope="one", sd=True)
+
+    def enrollment_services(self) -> list[Entry]:
+        return self.search(f"CN=Enrollment Services,{self.pki_container()}",
+                           "(objectClass=pKIEnrollmentService)",
+                           ["cn", "dNSHostName", "certificateTemplates", "msPKI-Enrollment-Servers", "flags",
+                            "whenChanged", "nTSecurityDescriptor"], scope="one", sd=True)
+
+    def pki_oids(self) -> list[Entry]:
+        """OID-Objekte (Ausgabe-Richtlinien) mit Verknüpfung auf eine Gruppe."""
+        return self.search(f"CN=OID,{self.pki_container()}", "(objectClass=msPKI-Enterprise-Oid)",
+                           ["cn", "displayName", "msPKI-Cert-Template-OID", "msDS-OIDToGroupLink"], scope="sub")
+
+    def nt_auth_certificates(self) -> Entry | None:
+        return self.one(f"CN=NTAuthCertificates,{self.pki_container()}", ["cACertificate"], sd=True)
+
+    def dns_zones(self) -> list[Entry]:
+        """AD-integrierte Zonen aus den DNS-Partitionen und dem Legacy-Ort unter System."""
+        bases = [f"CN=MicrosoftDNS,DC=DomainDnsZones,{self.base}",
+                 f"CN=MicrosoftDNS,DC=ForestDnsZones,{self.root().get('rootdomainnamingcontext', self.base)}",
+                 f"CN=MicrosoftDNS,CN=System,{self.base}"]
+        zones, seen = [], set()
+        for base in bases:
+            for z in self.search(base, "(objectClass=dnsZone)", ["name", "dnsProperty", "whenChanged"], scope="one"):
+                if z.str("name").lower() not in seen:
+                    seen.add(z.str("name").lower())
+                    z.attrs["_base"] = [base.encode()]
+                    zones.append(z)
+        return zones
+
+    def dns_records(self, zone_dn: str) -> list[Entry]:
+        return self.search(zone_dn, "(objectClass=dnsNode)", ["name", "dnsRecord", "dNSTombstoned"], scope="sub")
 
     def resolve_sids(self, sids: list[str]) -> dict[str, Entry]:
         """SID -> Objekt (Benutzer, Gruppe, Computer) in Paketen zu 50."""

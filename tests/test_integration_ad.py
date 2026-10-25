@@ -69,6 +69,32 @@ def test_documents_samba_domain_as_reader(adctx):
     assert "Password Settings Container" in pages["Active Directory: Kennwort- und Sperrrichtlinien"]
 
 
+def test_documents_adcs_and_dns_against_samba(adctx):
+    """AD CS und AD-DNS als normaler Domänenbenutzer: Vorlagen samt ESC-Prüfung und Zonen samt Einträgen."""
+    from doku_agent.generators.ad_docs import document_ad
+    adctx.cfg.ad.include = ["certificates", "dns"]
+    adctx.cfg.ad.dns_netbox_sync = False  # kein Netbox im Integrationstest
+    document_ad(adctx)
+    pages = {p.title: p.payload["content"] for p in adctx.store.list_proposals()}
+
+    adcs = pages["Active Directory: Zertifikatsdienste (AD CS)"]
+    assert "| corp-CA | dc1.corp.example.test |" in block(adcs, "adcs-cas")
+    templates = block(adcs, "adcs-templates")
+    assert "VulnUserAuth" in templates and "Antragsteller bestimmt Namen" in templates
+    assert "SafeTemplate" in templates and "Genehmigung nötig" in templates
+    findings = block(adcs, "adcs-findings")
+    # ESC1: VulnUserAuth lässt Domain Users mit frei wählbarem Namen zur Anmeldung registrieren
+    assert "ESC1" in findings and "VulnUserAuth" in findings and "frei wählen" in findings
+    # SafeTemplate (Genehmigung nötig) löst keinen ESC1 aus
+    assert "SafeTemplate" not in findings
+    # Reine CA-seitige ESCs sind über LDAP nicht erkennbar und werden ausdrücklich benannt
+    assert "ESC8" in findings and "CA-Servern prüfen" in findings
+
+    zone = pages["DNS-Zone: corp.example.test"]
+    assert "app01" in zone and "10.1.0.50" in zone
+    assert "corp.example.test" in block(pages["DNS-Zonen"], "dns-zones")
+
+
 def test_checks_against_samba(adctx):
     from doku_agent.web.app import run_checks
     adctx.__dict__["llm"].models = lambda: []
@@ -76,6 +102,8 @@ def test_checks_against_samba(adctx):
     assert checks["Active Directory (LDAP)"][0], checks["Active Directory (LDAP)"]
     assert checks["Active Directory (SYSVOL)"][0] and "Central Store vorhanden" in checks["Active Directory (SYSVOL)"][1]
     assert checks["AD-Leserechte"][0] and "Password Settings Container" in checks["AD-Leserechte"][1]
+    assert checks["AD-Zertifikatsdienste"][0] and "Vorlagen lesbar" in checks["AD-Zertifikatsdienste"][1]
+    assert checks["AD-DNS"][0] and "DNS-Zone(n) lesbar" in checks["AD-DNS"][1]
 
 
 def test_wrong_password_is_explained(adctx):

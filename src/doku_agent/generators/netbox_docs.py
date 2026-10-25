@@ -68,6 +68,58 @@ def overview(ctx: Context, name: str, kind: str, obj: dict, rows: list[list], in
         facts=narrative.fact_lines(facts), fallback=fallback)
 
 
+def is_windows(obj: dict, patterns: list[str]) -> bool:
+    platform = obj.get("platform") or {}
+    text = f"{_n(platform)} {_n(platform, 'slug')}".lower() if isinstance(platform, dict) else str(platform).lower()
+    return any(p.lower() in text for p in patterns)
+
+
+def ad_section(ctx: Context, name: str, obj: dict, ips: list[dict]) -> tuple[Block | None, list[list]]:
+    """Computerkonto und wirksame Gruppenrichtlinien. (None, []) ohne AD, bei Maschinen ohne Konto, die keine
+    Windows-Plattform haben, und wenn das AD nicht lesbar ist (der bestehende Abschnitt bleibt dann unverändert)."""
+    if not ctx.cfg.ad.enabled:
+        return None, []
+    from doku_agent import ad_effective
+    from doku_agent.connectors.ad import AdError
+    from doku_agent.connectors.sysvol import SysvolError
+    from doku_agent.generators.gpo_docs import gpo_page_path
+    try:
+        st = ad_effective.structure(ctx)
+        computer = st.computer(name)
+        if computer is None:
+            if not is_windows(obj, ctx.cfg.coverage.ad_platforms):
+                return None, []
+            return Block("netbox-ad", "Active Directory", "_Kein Computerkonto im Active Directory gefunden._"), \
+                [["Active Directory", "kein Computerkonto"]]
+        eff = ad_effective.effective(ctx, computer, [(ip.get("address") or "").split("/")[0] for ip in ips])
+    except (AdError, SysvolError, RuntimeError) as exc:
+        ctx.log.warning("%s: Gruppenrichtlinien nicht ermittelbar (%s) – Abschnitt bleibt unverändert", name, exc)
+        return None, []
+    enabled = not (computer.int("userAccountControl", 0) or 0) & 0x2
+    info = markdown.table(["Eigenschaft", "Wert"], [
+        ["Computerkonto", computer.str("sAMAccountName") or computer.name],
+        ["Container", eff.container], ["Konto aktiviert", "ja" if enabled else "nein"],
+        ["Betriebssystem laut AD", f"{computer.str('operatingSystem')} {computer.str('operatingSystemVersion')}".strip()
+         or "–"],
+        ["Standort (aus Subnetz)", eff.site or "nicht zugeordnet"],
+        ["Loopback-Verarbeitung", eff.loopback or "nein"],
+    ])
+    rows = [[n, markdown.link(gpo_page_path(ctx, a.guid, a.name), a.name), a.container, "ja" if a.enforced else "–",
+             a.wmi or "–"] for n, a in enumerate(eff.applied, 1)]
+    applied = markdown.table(["Priorität", "GPO", "Verknüpft an", "Erzwungen", "WMI-Filter (nicht ausgewertet)"],
+                             rows) if rows else "_Keine Gruppenrichtlinie wirkt auf diesen Computer._"
+    content = f"{info}\n\n**Wirksame Gruppenrichtlinien (Computerkonfiguration), Priorität 1 gewinnt:**\n\n{applied}"
+    if eff.skipped:
+        content += "\n\n**Verknüpft, aber nicht wirksam:**\n\n" + markdown.table(
+            ["GPO", "Verknüpft an", "Grund"], [list(s) for s in eff.skipped])
+    content += ("\n\n_Näherung ohne WMI-Filter; Benutzereinstellungen hängen von der OU des angemeldeten Benutzers ab"
+                + (" (hier mit Loopback)" if eff.loopback else "") + "._")
+    facts = [["Active Directory: Computerkonto", f"{computer.str('sAMAccountName')} in {eff.container}"]]
+    facts += [[f"Gruppenrichtlinie (Priorität {n})", f"{a.name}, verknüpft an {a.container}"]
+              for n, a in enumerate(eff.applied, 1)]
+    return Block("netbox-ad", "Active Directory und Gruppenrichtlinien", content), facts
+
+
 def document_object(ctx: Context, kind: str, obj_id: int) -> int | None:
     nb = ctx.netbox
     if kind == "vm":
@@ -136,10 +188,13 @@ def document_object(ctx: Context, kind: str, obj_id: int) -> int | None:
                 ["Firewall", "Regel", "Richtung", "Gegenseite", "Dienst", "Aktion", "Über Objekt"], fw_rows)
                 if fw_rows else "_Keine Firewall-Regel betrifft diese Maschine gezielt (nur über große Netze oder "
                                 "'beliebig')._"))
+    ad_block, ad_facts = ad_section(ctx, name, obj, ips)
+    if ad_block is not None:
+        blocks.append(ad_block)
     fw_unreadable = fw_rows is None and fw.enabled and fw.steckbrief_rules and bool(fw.devices)
     if narrative.enabled(ctx, "steckbrief") and not fw_unreadable:
         # Ohne lesbare Firewall bliebe der Überblick unvollständig -> dann bestehenden Text nicht ändern
-        text = overview(ctx, name, kind, obj, rows, interfaces, ips_by_iface, fw_rows)
+        text = overview(ctx, name, kind, obj, rows + ad_facts, interfaces, ips_by_iface, fw_rows)
         if text is not None:  # Sprachmodell nicht erreichbar: bestehenden Überblick unverändert lassen
             blocks.insert(0, Block("netbox-summary", "Überblick", text))
     if obj.get("comments"):

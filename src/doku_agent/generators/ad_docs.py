@@ -761,7 +761,13 @@ def document_ad(ctx: Context, areas: list[str] | None = None) -> list[int | None
                 all_links = gpo_docs.links(data)
                 for g in data.gpos:
                     results.append(gpo_docs.gpo_page(ctx, data, g, names, all_links))
-            for slug, heading in SECTIONS[area]:
+            if area == "certificates":
+                from doku_agent.generators import adcs_docs
+                results.append(adcs_docs.document_adcs(ctx, data, names))
+            elif area == "dns":
+                from doku_agent.generators import dns_docs
+                results += dns_docs.document_dns(ctx, data)
+            for slug, heading in SECTIONS.get(area, []):
                 results.append(_propose_section(ctx, slug, heading, data, names))
         except (AdError, SysvolError) as exc:  # z.B. DC während des Laufs weg: Bereich auslassen, nicht verfälschen
             ctx.log.error("Active Directory (%s) abgebrochen: %s", AREA_LABELS[area], exc)

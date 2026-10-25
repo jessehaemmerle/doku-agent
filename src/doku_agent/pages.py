@@ -135,6 +135,17 @@ def _convention_hint(profile: AreaProfile, path: str) -> str:
     return f"Für /{path} gibt es noch keinen Bereich mit Vorbildseiten – Standardvorlage verwendet."
 
 
+def _track_changes(ctx: Context, draft: PageDraft, content: str) -> None:
+    """Stand der Seite für den wöchentlichen Änderungsbericht festhalten (darf nie die Seite scheitern lassen)."""
+    from doku_agent.changes import AREAS, record
+    if not draft.stable_id or draft.stable_id.split(":", 1)[0] not in AREAS:
+        return
+    try:
+        record(ctx, draft.stable_id, draft.title, content, [b.id for b in draft.blocks])
+    except Exception as exc:  # Änderungsprotokoll ist Beiwerk
+        ctx.log.debug("Änderungsprotokoll übersprungen (%s): %s", draft.stable_id, exc)
+
+
 def propose_page(ctx: Context, draft: PageDraft) -> int | None:
     """Erzeugt einen Wiki-Vorschlag. Gibt None zurück, wenn sich nichts ändern würde."""
     path, page, profile, hints = _resolve_target(ctx, draft)
@@ -152,6 +163,7 @@ def propose_page(ctx: Context, draft: PageDraft) -> int | None:
 
     if page is None:
         content = build_new_content(draft, profile)
+        _track_changes(ctx, draft, content)
         payload = {
             "action": "create", "path": path, "title": draft.title, "description": draft.description,
             "tags": tags, "content": content, "blocks": [b.__dict__ for b in draft.blocks], "ops": [],
@@ -164,6 +176,7 @@ def propose_page(ctx: Context, draft: PageDraft) -> int | None:
         merged_tags = list(dict.fromkeys([*page.tags, *tags]))
         description = page.description or draft.description
         title = draft.title if draft.sync_title and draft.title else page.title
+        _track_changes(ctx, draft, content)
         if (content == page.content and merged_tags == page.tags and description == page.description
                 and title == page.title):
             ctx.log.info("/%s ist bereits aktuell – kein Vorschlag", page.path)

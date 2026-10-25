@@ -90,4 +90,46 @@ replace: flags
 flags: 1
 LDIF
 samba-tool ntacl sysvolreset
-echo "Testdaten angelegt: Clients - Sicherheit $CLI, Server - Basis $SRV"
+
+# --- AD CS: eine verwundbare und eine sichere Vorlage plus eine CA (nur LDAP-Objekte, kein echter CA-Dienst) ---
+CONF="CN=Configuration,$B"
+PKI="CN=Public Key Services,CN=Services,$CONF"
+DU=$(ldbsearch -H $DB "(sAMAccountName=Domain Users)" objectSid | awk '/^objectSid/{print $2}')
+# msPKI-Certificate-Name-Flag 0x1 = Antragsteller bestimmt Namen; Enrollment-Flag 0 = keine Genehmigung
+# Registrierungsrecht für Domain Users als ACE mit dem erweiterten Recht "Enroll" (0e10c968-...).
+# (A;;LCRPLORC;;;AU) = Authentifizierte Benutzer dürfen lesen – wie im echten AD die Schema-Standard-ACL der
+# Vorlagen, damit auch ein normaler Domänenbenutzer (doku-reader) Vorlagen und ZS aufzählen kann.
+ldbadd -H $DB <<LDIF 2>/dev/null || true
+dn: CN=VulnUserAuth,CN=Certificate Templates,$PKI
+objectClass: pKICertificateTemplate
+displayName: VulnUserAuth
+msPKI-Certificate-Name-Flag: 1
+msPKI-Enrollment-Flag: 0
+msPKI-RA-Signature: 0
+msPKI-Template-Schema-Version: 2
+pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2
+msPKI-Cert-Template-OID: 1.3.6.1.4.1.311.21.8.1.1
+nTSecurityDescriptor: O:DAG:DAD:(A;;LCRPLORC;;;AU)(OA;;CR;0e10c968-78fb-11d2-90d4-00c04f79dc55;;$DU)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)
+
+dn: CN=SafeTemplate,CN=Certificate Templates,$PKI
+objectClass: pKICertificateTemplate
+displayName: SafeTemplate
+msPKI-Certificate-Name-Flag: 0
+msPKI-Enrollment-Flag: 2
+msPKI-RA-Signature: 0
+msPKI-Template-Schema-Version: 2
+pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2
+nTSecurityDescriptor: O:DAG:DAD:(A;;LCRPLORC;;;AU)(OA;;CR;0e10c968-78fb-11d2-90d4-00c04f79dc55;;$DU)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)
+
+dn: CN=corp-CA,CN=Enrollment Services,$PKI
+objectClass: pKIEnrollmentService
+dNSHostName: dc1.corp.example.test
+certificateTemplates: VulnUserAuth
+certificateTemplates: SafeTemplate
+nTSecurityDescriptor: O:DAG:DAD:(A;;LCRPLORC;;;AU)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)
+LDIF
+
+# --- DNS: ein dynamischer A-Eintrag (zeigt sich im DNS-Bericht und im Netbox-Abgleich) ---
+samba-tool dns add dc1.corp.example.test corp.example.test app01 A 10.1.0.50 $A 2>/dev/null || true
+
+echo "Testdaten angelegt: Clients - Sicherheit $CLI, Server - Basis $SRV, AD CS (VulnUserAuth), DNS (app01)"

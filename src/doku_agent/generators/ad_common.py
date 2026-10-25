@@ -29,17 +29,22 @@ PROTECTED_USERS = 525
 WELL_KNOWN_DOMAINS = {"NT AUTHORITY", "NT-AUTORITÄT", "AUTORITE NT", "BUILTIN", "VORDEFINIERT", "NT SERVICE"}
 
 # Datengruppen und welcher Bereich sie braucht
-GROUPS = ("base", "structure", "gpo", "files", "password", "accounts", "privileged", "topology", "acl")
+GROUPS = ("base", "structure", "gpo", "files", "password", "accounts", "privileged", "topology", "acl", "adcs", "dns")
 NEEDS = {
     "gpo": {"base", "structure", "gpo", "files", "acl"},
     "ous": {"base", "structure", "gpo", "accounts", "acl"},
     "password_policy": {"base", "password", "structure", "gpo"},
     "privileged": {"base", "accounts", "privileged"},
     "domain": {"base", "topology", "accounts", "structure"},
-    "audit": set(GROUPS),
+    "certificates": {"base", "adcs", "acl"},
+    "dns": {"base", "dns"},
+    # Die AD-Prüfung (ad_docs.audit) deckt GPOs, Konten, Kerberos, Rechte und Domäne ab; Zertifikate und DNS
+    # haben ihre eigenen Seiten/Prüfungen und werden hier nicht geladen.
+    "audit": set(GROUPS) - {"adcs", "dns"},
 }
 AREA_LABELS = {"gpo": "Gruppenrichtlinien", "ous": "OU-Struktur", "password_policy": "Kennwortrichtlinien",
-               "privileged": "Privilegierte Konten", "domain": "Domäne", "audit": "Prüfung"}
+               "privileged": "Privilegierte Konten", "domain": "Domäne", "certificates": "Zertifikatsdienste",
+               "dns": "DNS", "audit": "Prüfung"}
 
 
 def day(value: datetime | None) -> str:
@@ -125,6 +130,12 @@ class AdData:
     forest_level: int | None = None
     laps: dict[str, bool] = field(default_factory=dict)  # Attribut -> im Schema
     guid_names: GuidNames = field(default_factory=GuidNames)
+    adcs_cas: list[Entry] = field(default_factory=list)
+    adcs_templates: list[Entry] = field(default_factory=list)
+    adcs_ntauth: Entry | None = None
+    adcs_policy_groups: dict[str, str] = field(default_factory=dict)  # Ausgabe-Richtlinien-OID -> Gruppen-SID
+    dns_zones: list[Entry] = field(default_factory=list)
+    dns_records: dict[str, list[Entry]] = field(default_factory=dict)  # Zonenname -> dnsNode-Objekte
     loaded: set[str] = field(default_factory=set)
 
     @property
@@ -138,6 +149,12 @@ class AdData:
     @property
     def dns(self) -> str:
         return (self.crossref.str("dnsRoot") if self.crossref else "") or dns_name(self.base)
+
+
+def _group_sid(client, dn: str) -> str:
+    """Gruppen-DN -> SID (für die Verknüpfung einer Ausgabe-Richtlinie auf eine Gruppe)."""
+    e = client.one(dn, ["objectSid"])
+    return e.sid() if e is not None else dn
 
 
 def fetch(ctx: Context, groups: set[str]) -> tuple[AdData, dict[str, str]]:
@@ -219,14 +236,31 @@ def fetch(ctx: Context, groups: set[str]) -> tuple[AdData, dict[str, str]]:
     def acl():
         data.guid_names = GuidNames(client.schema_names(), client.extended_rights())
 
+    def adcs():
+        data.adcs_cas = client.enrollment_services()
+        data.adcs_templates = client.cert_templates()
+        data.adcs_ntauth = client.nt_auth_certificates()
+        for oid in client.pki_oids():
+            group = oid.str("msDS-OIDToGroupLink")
+            tmpl = oid.str("msPKI-Cert-Template-OID")
+            if group and tmpl:
+                data.adcs_policy_groups[tmpl] = _group_sid(client, group)
+
+    def dns():
+        data.dns_zones = client.dns_zones()
+        for z in data.dns_zones:
+            base = (z.raw("_base") or b"").decode() or client.base
+            data.dns_records[z.str("name")] = client.dns_records(f"DC={z.str('name')},{base}")
+
     for name, fn in (("structure", structure), ("gpo", gpo), ("files", files), ("password", password),
-                     ("accounts", accounts), ("privileged", privileged), ("topology", topology), ("acl", acl)):
+                     ("accounts", accounts), ("privileged", privileged), ("topology", topology), ("acl", acl),
+                     ("adcs", adcs), ("dns", dns)):
         if name == "files" and "gpo" not in data.loaded:
             continue
         load(name, fn)
     # Reihenfolge der LDAP-Antworten kann je DC abweichen – Seiten sollen davon nicht abhängen
     for attr in ("ous", "sites", "gpos", "wmi", "psos", "users", "computers", "msas", "dcs", "ntds", "subnets",
-                 "site_links", "trusts", "features"):
+                 "site_links", "trusts", "features", "adcs_cas", "adcs_templates", "dns_zones"):
         setattr(data, attr, sorted(getattr(data, attr), key=lambda e: e.dn.lower()))
     for pg in data.privileged:
         pg.members.sort(key=lambda e: e.dn.lower())

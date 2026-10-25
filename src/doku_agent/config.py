@@ -78,6 +78,11 @@ DEFAULT_PATHS = {
     "entra_ca": "identitaet/entra/conditional-access/{name}",
     "ad": "identitaet/active-directory/{section}",
     "ad_gpo": "identitaet/active-directory/gruppenrichtlinien/{name}",
+    "adcs": "identitaet/active-directory/zertifikatsdienste",
+    "addns": "netzwerk/dns/{zone}",
+    "addns_index": "netzwerk/dns",
+    "changes": "wartung/aenderungen/{week}",
+    "changes_index": "wartung/aenderungen",
 }
 # Zusätzliche Tags je Dokutyp (gelernte Tags aus dem Wiki kommen dazu).
 DEFAULT_TAGS = {
@@ -96,6 +101,11 @@ DEFAULT_TAGS = {
     "entra_ca": ["entra", "conditional-access"],
     "ad": ["active-directory"],
     "ad_gpo": ["active-directory", "gpo"],
+    "adcs": ["active-directory", "pki", "zertifikate"],
+    "addns": ["dns"],
+    "addns_index": ["dns"],
+    "changes": ["aenderungen"],
+    "changes_index": ["aenderungen"],
 }
 
 
@@ -228,13 +238,18 @@ class AdConfig(BaseModel):
     # ein eingehängtes Verzeichnis mit *.admx und Sprachordnern; Sprache mit Ersatz en-US
     admx_dir: str = ""
     admx_language: str = "de-DE"
-    include: list[Literal["gpo", "ous", "password_policy", "privileged", "domain", "audit"]] = Field(
-        default_factory=lambda: ["gpo", "ous", "password_policy", "privileged", "domain", "audit"])
+    include: list[Literal["gpo", "ous", "password_policy", "privileged", "domain", "certificates", "dns",
+                          "audit"]] = Field(
+        default_factory=lambda: ["gpo", "ous", "password_policy", "privileged", "domain", "certificates", "dns",
+                                 "audit"])
     # Personen in Gruppen und Befunden: Anzeigename + Anmeldename, nur Anzeigename oder nur die Anzahl
     user_names: Literal["name_account", "name", "count"] = "name_account"
     stale_days: int = 90  # Konten ohne Anmeldung seit so vielen Tagen gelten als verwaist
     krbtgt_max_age_days: int = 180  # älteres krbtgt-Kennwort meldet die Prüfung
     min_password_length: int = 12  # kürzere Mindestlänge (Domäne oder PSO) meldet die Prüfung
+    # DNS-Einträge mit Netbox abgleichen und Vorschläge für den DNS-Namen machen (nur mit Freigabe)
+    dns_netbox_sync: bool = True
+    dns_stale_days: int = 180  # dynamische A-Einträge ohne Aktualisierung seit so vielen Tagen gelten als veraltet
 
 
 class FortiGateDevice(BaseModel):
@@ -353,6 +368,8 @@ class CoverageConfig(BaseModel):
     wazuh_roles: list[str] = Field(default_factory=lambda: ["server", "client"])  # Netbox-Rollen (Slug) mit Wazuh-Pflicht
     intune_roles: list[str] = Field(default_factory=lambda: ["client"])
     stale_days: int = 30  # "Funkstille": letzter Kontakt älter als so viele Tage
+    # Mit Active Directory: Maschinen dieser Plattformen (Teil von Name oder Slug) brauchen ein Computerkonto
+    ad_platforms: list[str] = Field(default_factory=lambda: ["windows"])
 
 
 class LintConfig(BaseModel):
@@ -401,6 +418,13 @@ class NarrativeConfig(BaseModel):
     fact_check: bool = True  # Angaben im Text gegen die Daten prüfen; sonst zweiter Versuch bzw. feste Vorlage
 
 
+class ChangesConfig(BaseModel):
+    """Wöchentlicher Änderungsbericht. Der Agent merkt sich bei jedem Lauf die Tabellenzeilen der Seiten und
+    protokolliert, was hinzukommt oder entfällt."""
+    enabled: bool = True
+    keep_weeks: int = 26  # so viele Wochen stehen in der Übersicht (das Protokoll selbst reicht ~400 Tage zurück)
+
+
 class Config(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -417,6 +441,7 @@ class Config(BaseModel):
     narrative: NarrativeConfig = Field(default_factory=NarrativeConfig)
     lint: LintConfig = Field(default_factory=LintConfig)
     coverage: CoverageConfig = Field(default_factory=CoverageConfig)
+    changes: ChangesConfig = Field(default_factory=ChangesConfig)
     schedule: list[ScheduleEntry] = Field(default_factory=list)
     web: WebConfig = Field(default_factory=WebConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)

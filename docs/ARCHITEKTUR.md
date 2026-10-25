@@ -49,18 +49,21 @@ src/doku_agent/
   vcenter_inventory.py  vCenter-Hosts und VMs als Assets, Cluster-Schritte
   switches.py      SNMP-Daten -> Switch, Ports und Kabel (LLDP, MAC-Tabelle) als Änderungen
   fortigate_netbox.py   FortiGate -> Gerät, Interfaces, IPs, VLANs, Präfixe als Änderungen
-  coverage.py      Abdeckungsbericht (Wazuh, Intune, Netbox, Funkstille)
+  coverage.py      Abdeckungsbericht (Wazuh, Intune, Netbox, Funkstille, AD-Computerkonten)
   netbox_sync.py   Abweichungen bekannter Maschinen als einzeln freigebbare Änderungen (Vorher/Nachher, Abhängigkeiten)
   netbox_fields.py Custom Fields des Agents: Status/Anlage-Vorschlag, Werte, last_seen
   embeddings.py    Ollama /api/embed
   semantic.py      Suchindex (Abschnitte je Überschrift), Suche, Fragen mit Quellen
   ad_acl.py        Sicherheitsbeschreibungen (MS-DTYP) lesen, Rechte in Worten, Standard- und Admin-Prinzipale
   gpo_files.py     Registry.pol, GptTmpl.inf, audit.csv, scripts.ini, Preferences-XML, ADMX/ADML (reine Parser)
+  ad_dns.py        MS-DNSP dnsRecord/dnsProperty-Binärformat dekodieren (A, AAAA, CNAME, SRV, SOA, … statisch/dynamisch)
+  ad_effective.py  RSoP-Näherung: wirksame GPOs je Computer (Standort, OU-Pfad, Erzwingung, Blockade, Sicherheitsfilterung)
+  changes.py       Änderungsverfolgung: Tabellenzeilen je stabiler Kennung speichern, Wochenseite + Übersicht
   lint.py          Wiki-Lint: tote Links, Dubletten, ohne Tags, veraltete Seiten (Neuberechnung über stable_id), Korrekturen
   connectors/      netbox.py, wazuh.py, graph.py (Graph-Basis: Token, 403-Meldungen), intune.py, entra.py,
                    fortigate.py, vcenter.py, snmp.py, ad.py (LDAP), sysvol.py (SMB)
   generators/      narrative (Fließtext + Faktenprüfung), wazuh_docs, intune_docs, entra_docs, netbox_docs,
-                   fortigate_docs, ad_common/ad_docs/gpo_docs (Active Directory), freeform,
+                   fortigate_docs, ad_common/ad_docs/gpo_docs/adcs_docs/dns_docs (Active Directory), freeform,
                    common (Maskierung, Cache, Stil)
   jobs.py          Job-Registry, Job-Log, Worker-Thread
   scheduler.py     Tages-Zeitplan
@@ -336,3 +339,50 @@ Inhaltlich waren sie korrekt bis auf falsch zugeordnete Befunde in der Bewertung
 („Ordne jeden Befund nur der Prüfung zu, unter der er steht“), und die Summenzeile ist eindeutiger formuliert.
 Grundsätzlich bleibt: Die Prüfung sichert Werte, nicht Beziehungen zwischen Werten.
 
+
+## Drei AD-Erweiterungen (25.10.2026)
+
+Drei aufeinander aufbauende Erweiterungen, alle wieder nur lesend und über die bestehende Freigabe-Liste.
+
+**Feature 1 – Wirksame GPOs im Steckbrief und AD im Abdeckungsbericht** (`ad_effective.py`, `netbox_docs.py`,
+`coverage.py`):
+- `ad_effective.effective()` nähert den RSoP an: Standort über die IP-Adressen der Maschine und die Standort-Subnetze,
+  OU-Pfad des Computerkontos von der Domäne nach unten, GPOs in Anwendungsreihenfolge (Standort → Domäne → OUs). Es
+  wertet deaktivierte und erzwungene Verknüpfungen, blockierte Vererbung (erzwungene gewinnen), den Loopback-Modus und
+  die Sicherheitsfilterung (Apply-Group-Policy für die Maschine oder ihre Gruppen) aus. WMI-Filter werden genannt, aber
+  nicht zur Laufzeit ausgewertet – es bleibt eine Näherung.
+- Die AD-Struktur wird je Lauf einmal geladen und im `Context` zwischengespeichert (`AdStructure`), auch Fehler, damit
+  nicht pro Steckbrief neu verbunden wird. Der Steckbrief-Abschnitt entsteht nur für Windows-Maschinen (Plattformname
+  oder -slug), respektiert den `user_names: count`-Modus und fällt still aus, wenn das Computerkonto fehlt.
+- Der Abdeckungsbericht bekommt zwei AD-Spalten: Windows-Maschinen in Netbox ohne AD-Konto und aktive AD-Konten ohne
+  Netbox-Eintrag (`coverage.ad_report`). Die zu fordernde Plattform steht in `coverage.ad_platforms`.
+
+**Feature 2 – AD CS und AD-DNS** (`adcs_docs.py`, `dns_docs.py`, `ad_dns.py`, Connector-Methoden in `connectors/ad.py`):
+- AD CS wird vollständig aus dem Configuration-NC gelesen (Enrollment Services, Certificate Templates, NTAuth, OID-zu-
+  Gruppe). Die Prüfung meldet die am Verzeichnis erkennbaren Eskalationswege **ESC1–ESC5, ESC9, ESC13, ESC15** zur
+  Härtung der eigenen Umgebung; rein CA-seitige (ESC6/7/8/11/16) werden ausdrücklich als „über LDAP nicht prüfbar“
+  benannt, damit keine falsche Entwarnung entsteht. Wer registrieren darf, kommt aus der DACL über das erweiterte Recht
+  „Zertifikatregistrierung“ (GUID `0e10c968…`) bzw. Vollzugriff.
+- **Wichtig:** Sicherheitsbeschreibungen kommen nur zurück, wenn `nTSecurityDescriptor` ausdrücklich in der Attributliste
+  steht *und* das SD-Flags-Steuerelement gesetzt ist. Das SD-Flags-Control allein (`sd=True`) genügt nicht – es schränkt
+  nur die zurückgegebenen Teile ein (Besitzer + DACL, ohne SACL), fordert das Attribut aber nicht an. Ein Regressionstest
+  (`test_adcs_requests_security_descriptor_with_sd_flags`) hält beides fest, weil der Fehler sonst erst gegen ein echtes
+  AD auffällt.
+- AD-DNS dekodiert das binäre `dnsRecord`-Format (MS-DNSP) selbst in `ad_dns.py`: Header mit `TtlSeconds` big-endian und
+  `TimeStamp` in Stunden seit 1601 (0 = statisch), `DNS_COUNT_NAME` für Namen, Typen A/AAAA/CNAME/NS/PTR/MX/SRV/TXT/SOA.
+  Dynamische A-Einträge, die länger als `dns_stale_days` nicht aktualisiert wurden, gelten als veraltet. Der Netbox-
+  Abgleich schlägt nur vor (Freigabe nötig), `dns_name` an IP-Adressen zu setzen.
+
+**Feature 3 – Änderungsbericht** (`changes.py`, Haken in `pages.py`):
+- Bei jeder erzeugten Seite werden die Zeilen der verwalteten Tabellen je stabiler Kennung in der kv-Tabelle
+  abgelegt und mit dem vorigen Stand verglichen; Diffs landen im Ereignis-Log. Reine Fließtext-, Übersichts- und
+  Bewertungsblöcke sind über Suffixe ausgenommen, damit formulierte Absätze keine Scheinänderungen erzeugen. Die erste
+  Beobachtung einer Seite ist der Ausgangspunkt und erzeugt keine Einträge.
+- Der Job `changes` baut daraus eine Seite je ISO-Kalenderwoche plus eine Übersicht. `changes.keep_weeks` begrenzt die
+  Zahl der Wochenseiten.
+
+**Testdaten (`tests/samba_ad/setup.sh`):** eine verwundbare Vorlage (`VulnUserAuth`, ESC1), eine sichere
+(`SafeTemplate`, Genehmigung nötig), eine CA und ein dynamischer A-Eintrag (`app01`). Die Vorlagen-DACLs enthalten –
+wie im echten AD – ein Leserecht für Authentifizierte Benutzer (`(A;;LCRPLORC;;;AU)`), sonst könnte der normale
+Domänenbenutzer `doku-reader` die Objekte nicht einmal aufzählen. Der Integrationstest prüft gegen diesen Samba-DC,
+dass ESC1 für `VulnUserAuth` anschlägt, `SafeTemplate` sauber bleibt und die DNS-Zone den Eintrag `app01` zeigt.

@@ -46,8 +46,8 @@ der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekt
 | **vCenter** | Cluster, ESXi-Hosts (Hersteller, Modell, Seriennummer) und VMs mit vCPU, RAM, NICs, Gast-IPs und Disks | Teil der Discovery: Cluster und Hosts als Geräte, VMs im Cluster auf ihrem Host, virtuelle Disks einzeln; auch ausgeschaltete VMs |
 | **Switches** | SNMP: Systemdaten, Ports, LLDP-Nachbarn, MAC-Tabelle | Je Switch ein Vorschlag: Gerät, Ports und **Kabel** zu LLDP-Nachbarn und zu Endgeräten an Ports mit genau einer bekannten MAC |
 | **FortiGate → Netbox** | Interfaces, VLANs, IPs der Firewall | Gerät mit Interfaces (LAG-Mitglieder, VLAN-Parent), IP-Adressen samt primärer IP, VLANs und Präfixe; alles einzeln freigebbar |
-| **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces, IPs und Kabeln | Wiki-Seite pro Maschine: oben ein **Überblick in Fließtext** (was sie ist, wo sie läuft, wie sie angebunden ist, welche Firewall-Regeln sie betreffen), darunter die Tabellen mit „Verbunden mit“ je Port und den **Firewall-Regeln**; wird bei Änderungen aktualisiert |
-| **Abdeckung** | Netbox gegen Wazuh, Intune und vCenter | Seite `infrastruktur/abdeckung`: Maschinen ohne Wazuh-Agent, Clients ohne Intune, Maschinen, die in Netbox fehlen, und Funkstille seit über 30 Tagen |
+| **Netbox-Steckbriefe** | Gerät/VM aus Netbox mit Interfaces, IPs und Kabeln | Wiki-Seite pro Maschine: oben ein **Überblick in Fließtext** (was sie ist, wo sie läuft, wie sie angebunden ist, welche Firewall-Regeln sie betreffen), darunter die Tabellen mit „Verbunden mit“ je Port und den **Firewall-Regeln**; bei Windows-Maschinen zusätzlich das **AD-Computerkonto und die wirksamen Gruppenrichtlinien** (welche GPOs über Standort/Domäne/OUs in welcher Reihenfolge greifen, inkl. blockierter Vererbung und Sicherheitsfilterung); wird bei Änderungen aktualisiert |
+| **Abdeckung** | Netbox gegen Wazuh, Intune, vCenter und AD | Seite `infrastruktur/abdeckung`: Maschinen ohne Wazuh-Agent, Clients ohne Intune, Maschinen, die in Netbox fehlen, Funkstille seit über 30 Tagen und – mit AD – Windows-Maschinen in Netbox ohne AD-Computerkonto sowie aktive AD-Computerkonten, die in Netbox fehlen |
 | **Wazuh-Regeln/Decoder** | Liest `etc/rules` bzw. `etc/decoders`, parst das XML | Seite pro Datei: Übersicht, Regel-Tabelle (Level, Bedingungen, MITRE) und Erläuterung jeder Regel durch das LLM |
 | **Wazuh-Konfiguration** | `ossec.conf` des Managers und `agent.conf` jeder Gruppe | Zusammenfassung und Einstellungen je Abschnitt; Passwörter, API-Keys und Webhooks werden maskiert |
 | **Wazuh-SCA** | SCA-Ergebnisse aller (oder ausgewählter) Agents | Score je Richtlinie und fehlgeschlagene Prüfungen mit Behebung |
@@ -58,6 +58,9 @@ der tote Links, Dubletten, fehlende Tags und veraltete Seiten findet und Korrekt
 | **AD: Gruppenrichtlinien** | GPOs aus dem AD, ihre Dateien aus SYSVOL, Namen aus dem Central Store | Je GPO eine Seite: Beschreibung durch das LLM, Status, Verknüpfungen mit Reihenfolge, WMI-Filter, Sicherheitsfilterung und Bearbeitungsrechte, dazu alle Einstellungen – administrative Vorlagen mit Richtliniennamen, Sicherheitseinstellungen (Kontorichtlinien, Benutzerrechte, Sicherheitsoptionen, eingeschränkte Gruppen, Dienste), erweiterte Überwachung, Firewall-Regeln, Skripte, Preferences. Kennwörter aus Preferences erscheinen nie |
 | **AD: Struktur und Richtlinien** | OUs, Domäne, PSOs, privilegierte Gruppen, DCs, Standorte, Vertrauensstellungen | Seiten zu OU-Struktur (verknüpfte GPOs, blockierte Vererbung, Löschschutz, **Delegationen** in Worten), Kennwort- und Sperrrichtlinien inkl. feingranularer Richtlinien und Kerberos, privilegierten Gruppen (auch verschachtelt), Dienstkonten und Kerberos-Delegierung, Domäne und Gesamtstruktur |
 | **AD: Prüfung** | Alles oben zusammen | GPOs mit gespeicherten Kennwörtern, unwirksame oder beschädigte GPOs, schwache Kennwortrichtlinien, Admins mit „Kennwort läuft nie ab“, Kerberoasting und AS-REP-Roasting, uneingeschränkte Delegierung, altes krbtgt-Kennwort, verwaiste Konten, DCSync-Rechte, gefährliche Rechte auf Domäne und AdminSDHolder, Papierkorb, MachineAccountQuota, Vertrauensstellungen ohne SID-Filterung |
+| **AD: Zertifikatsdienste (AD CS)** | Zertifizierungsstellen und Vorlagen aus dem Configuration-NC (nur über LDAP, nur lesend) | Seite mit allen ZS, veröffentlichten Vorlagen (wer registrieren darf, Verwendungszwecke) und einer **Prüfung auf verbreitete Fehlkonfigurationen** (ESC1–ESC5, ESC9, ESC13, ESC15), soweit über LDAP erkennbar. Rein CA-seitige Schwachstellen (ESC6/7/8/11/16) werden ausdrücklich als „nicht über LDAP prüfbar“ benannt |
+| **AD: DNS** | AD-integrierte DNS-Zonen aus den DNS-Partitionen und unter `System` | Übersicht aller Zonen und je Zone eine Seite mit allen Einträgen (A, AAAA, CNAME, SRV, MX, NS, PTR, TXT, SOA), statisch vs. dynamisch; veraltete dynamische Einträge werden markiert. Mit Netbox ein **Abgleich** (Bericht plus Vorschläge, `dns_name` an Geräten/IPs zu setzen – nur nach Freigabe) |
+| **Änderungsbericht** | Alle erzeugten Seiten über die Zeit | Seite je ISO-Kalenderwoche plus Übersicht: was neu hinzukam oder sich geändert hat (neue/geänderte GPOs, neue Firewall-Regeln, neue Admin-Mitglieder, neue und behobene Prüf-Befunde) über alle Bereiche hinweg |
 | **Entra-Gruppen** | Alle Gruppen, die in Intune-Zuweisungen vorkommen | Übersichtsseite mit Art, dynamischer Regel, Mitgliederzahlen (Benutzer, Geräte, Untergruppen) und allen Zuweisungen je Gruppe |
 | **FortiGate** | Policies, Adressen/Dienste, VIPs/IP-Pools, Interfaces/Zonen/Routen, IPsec | Je Firewall (und VDOM) sechs Seiten: Regeln mit Erklärung jeder Regel durch das LLM, NAT, Objekte mit Verwendung, Netzwerk, VPN und eine **Prüfung** (verdeckte Regeln, any-any, ohne Logging, Internet ohne Sicherheitsprofil, unbenutzte Objekte). PSKs und Passwörter werden nie übernommen |
 | **Freie Doku** | Stichpunkte und Dateien (TXT, Config, Log, CSV/JSON/XML/YAML, PDF, DOCX) | Der Agent sucht eine passende bestehende Seite (auch inhaltlich über den Suchindex) und ergänzt sie, oder legt eine neue im passenden Bereich an |
@@ -465,6 +468,8 @@ Der Job `ad` liest per LDAP (nur Suchen) und SYSVOL (nur Lesen) und schlägt die
 | `privilegierte-konten` | Organisations-, Domänen- und Schema-Admins, Administratoren, Konten-/Server-/Sicherungs-/Druck-Operatoren, Schlüsseladministratoren, Richtlinien-Ersteller-Besitzer, DnsAdmins – mit allen Mitgliedern auch über verschachtelte Gruppen und die primäre Gruppe; Dienstkonten (SPN, gMSA), Kerberos-Delegierung, krbtgt, Administrator, Gast |
 | `domaene` | Funktionsebenen, Papierkorb, Tombstone, MachineAccountQuota, LAPS, Domänencontroller mit Standort, GC, RODC und Betriebsmasterrollen, Standorte, Subnetze, Standortverknüpfungen, Vertrauensstellungen, Betriebssysteme der Computer |
 | `pruefung` | Befunde (siehe unten) |
+| `zertifikatsdienste` | AD CS: Zertifizierungsstellen und Vorlagen mit ESC-Prüfung (siehe unten), nur wenn `certificates` in `ad.include` steht |
+| `dns` und `dns/<zone>` | AD-integrierte DNS-Zonen mit allen Einträgen, nur wenn `dns` in `ad.include` steht |
 
 **Einstellungen einer GPO:**
 - **Administrative Vorlagen** aus `Registry.pol` mit Richtlinienname, Status (aktiviert/deaktiviert), Optionen und
@@ -502,6 +507,59 @@ Damit unveränderte Daten keine Schein-Änderungen erzeugen, stehen auf den Seit
 repliziert; „inaktiv“ ist daher eine Näherung (bei Computern zählt auch der automatische Kennwortwechsel). Mit
 `user_names: count` erscheinen keine Personennamen im Wiki, nur Anzahlen; Gruppen, Computer und Dienstkonten bleiben
 benannt.
+
+### Wirksame Gruppenrichtlinien im Steckbrief
+
+Steht AD zur Verfügung, bekommt jeder Netbox-Steckbrief einer **Windows-Maschine** einen Abschnitt „Active
+Directory“: das gefundene Computerkonto (DN, Betriebssystem) und eine Tabelle der **wirksamen Gruppenrichtlinien**.
+Der Agent nähert den RSoP (Resultant Set of Policy) an: Er bestimmt den Standort der Maschine über ihre IP-Adressen
+und die Standort-Subnetze, läuft den OU-Pfad des Computerkontos von der Domäne nach unten ab und sammelt die
+verknüpften GPOs in Anwendungsreihenfolge (Standort → Domäne → OUs, oben nach unten). Berücksichtigt werden
+deaktivierte Verknüpfungen, erzwungene Verknüpfungen (gewinnen gegen Blockaden und gegen tiefer liegende GPOs),
+blockierte Vererbung, der reine Computerteil (Loopback) und die Sicherheitsfilterung (nur GPOs, die die Maschine
+oder eine ihrer Gruppen lesen und anwenden dürfen). Die Tabelle zeigt je GPO Reihenfolge, Ebene (Standort/Domäne/OU)
+und ob sie erzwungen ist, plus eine Liste der aus Filterung oder Blockade ausgelassenen GPOs. Das ist eine Näherung
+ohne WMI-Filter-Auswertung zur Laufzeit und ohne lokale Richtlinien – gedacht als Überblick, nicht als Ersatz für
+`gpresult` auf der Maschine selbst.
+
+### AD-Zertifikatsdienste (AD CS)
+
+Mit `certificates` in `ad.include` liest der Agent die Zertifikatvorlagen und Zertifizierungsstellen aus dem
+Configuration-NC (`CN=Public Key Services,CN=Services,…`) – **ausschließlich über LDAP, nur lesend**, ohne
+Verbindung zum eigentlichen CA-Dienst. Die Seite `zertifikatsdienste` listet die ZS, die veröffentlichten Vorlagen
+(wer sie registrieren darf, aufgelöst aus der DACL über das erweiterte Recht „Zertifikatregistrierung“, dazu
+Verwendungszwecke und Besonderheiten) und eine **Prüfung auf verbreitete Fehlkonfigurationen zur Härtung der eigenen
+Umgebung**. Über LDAP erkennbar und daher geprüft: **ESC1** (Antragsteller wählt den Namen frei + Clientauthentifizierung
++ keine Genehmigung), **ESC2** (Beliebiger-Zweck- oder Kein-EKU-Vorlage), **ESC3** (Anforderungsbevollmächtigter),
+**ESC4** (nicht-privilegierte Konten dürfen die Vorlage ändern), **ESC5** (gefährliche Rechte auf PKI-Objekten),
+**ESC9** (Vorlage ohne SID-Sicherheitserweiterung), **ESC13** (Vorlage an eine Gruppe über eine Ausgaberichtlinie
+gekoppelt) und **ESC15** (Schema v1 mit Anwendungsrichtlinien). Rein CA-seitige Schwachstellen – **ESC6**
+(EDITF_ATTRIBUTESUBJECTALTNAME2), **ESC7** (CA-Berechtigungen), **ESC8** (Web-Registrierung/NTLM-Relay), **ESC11**
+(RPC ohne Verschlüsselung) und **ESC16** (CA-weite SID-Erweiterung) – lassen sich nicht über LDAP feststellen und
+werden auf der Seite ausdrücklich als „auf den CA-Servern zu prüfen“ genannt, damit keine falsche Entwarnung entsteht.
+Ein normaler Domänenbenutzer genügt: Besitzer und DACL der Objekte werden mit dem SD-Flags-Steuerelement ohne SACL
+gelesen.
+
+### AD-integrierte DNS-Zonen
+
+Mit `dns` in `ad.include` dokumentiert der Agent die AD-integrierten DNS-Zonen aus den Anwendungspartitionen
+(`DomainDnsZones`, `ForestDnsZones`) und dem Legacy-Ort unter `System`. Die Übersicht `dns` listet alle Zonen mit Art
+und dynamischen Updates; je Zone zeigt `dns/<zone>` alle Einträge (A, AAAA, CNAME, SRV, MX, NS, PTR, TXT, SOA), aus
+dem binären `dnsRecord`-Format dekodiert, mit der Unterscheidung statisch/dynamisch. Dynamische A-Einträge, die seit
+mehr als `dns_stale_days` Tagen (Standard 180) nicht aktualisiert wurden, werden als **veraltet** markiert. Ist Netbox
+eingerichtet und `dns_netbox_sync` aktiv, erstellt der Agent zusätzlich einen **Abgleich**: Er vergleicht A/AAAA-Namen
+mit den IP-Adressen in Netbox und schlägt – nur als Vorschlag, der freigegeben werden muss – vor, fehlende `dns_name`-
+Werte an den passenden IP-Adressen bzw. Geräten zu setzen.
+
+### Änderungsbericht
+
+Der Job `changes` führt Buch darüber, was sich in der Doku verändert. Bei jeder erzeugten Seite werden die Zeilen der
+verwalteten Tabellen je stabiler Kennung gespeichert; reine Fließtext-, Übersichts- und Bewertungsblöcke bleiben außen
+vor. Daraus entsteht eine **Seite je ISO-Kalenderwoche** plus eine Übersicht, die zeigt, was neu hinzukam oder sich
+änderte: neue und geänderte GPOs, neue Firewall-Regeln, neue Mitglieder in privilegierten Gruppen, neue und behobene
+Prüf-Befunde – über alle Bereiche hinweg (Netbox, AD, Entra, FortiGate, Wazuh, Intune). Die erste Beobachtung einer
+Seite ist der Ausgangspunkt und erzeugt keine Einträge. Über `changes.keep_weeks` (Standard 26) wird festgelegt, wie
+viele Wochenseiten aufgehoben werden.
 
 ## Firewall-Dokumentation (FortiGate)
 

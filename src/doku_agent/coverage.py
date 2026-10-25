@@ -65,8 +65,49 @@ def build_report(ctx: Context, assets: list[Asset], index: NetboxIndex) -> dict[
                           if (a.sources.get("vcenter") or {}).get("power_state")), "")
             note = "VM ausgeschaltet" if power and power != "POWERED_ON" else ""
             report["stale"].append([name, kind, role or "–", seen, note])
+    if ctx.cfg.ad.enabled:
+        ad = ad_report(ctx, index)
+        if ad is not None:  # AD nicht lesbar: AD-Abschnitte bleiben, wie sie sind
+            report.update(ad)
     for rows in report.values():
         rows.sort(key=lambda r: str(r[0]).lower())
+    return report
+
+
+def ad_report(ctx: Context, index: NetboxIndex) -> dict[str, list[list]] | None:
+    """Windows-Maschinen in Netbox ohne Computerkonto und aktivierte Computerkonten ohne Netbox-Eintrag."""
+    from doku_agent.connectors.ad import AdError, parent_dn
+    from doku_agent.generators.ad_common import ou_path, stale
+    from doku_agent.generators.netbox_docs import is_windows
+    try:
+        computers = ctx.ad.computers()
+        base = ctx.ad.base
+    except AdError as exc:
+        ctx.log.warning("Abdeckung: Active Directory nicht lesbar (%s) – AD-Abschnitte bleiben unverändert", exc)
+        return None
+    by_name: dict[str, object] = {}
+    for c in computers:
+        for key in (c.str("sAMAccountName").rstrip("$"), c.name, c.str("dNSHostName").split(".")[0]):
+            if key:
+                by_name.setdefault(key.lower(), c)
+    report: dict[str, list[list]] = {"no_ad": [], "ad_only": []}
+    matched = set()
+    for key, obj in index.objects.items():
+        name = obj.get("name") or ""
+        hit = by_name.get(name.split(".")[0].lower()) if name else None
+        if hit is not None:
+            matched.add(hit.dn.lower())
+        elif is_windows(obj, ctx.cfg.coverage.ad_platforms):
+            report["no_ad"].append([name or f"#{key[1]}", "Gerät" if key[0] == DEVICE else "VM",
+                                    _slug(obj.get("platform")) or "–", _slug(obj.get("role")) or "–"])
+    days = ctx.cfg.ad.stale_days
+    for c in computers:
+        if c.dn.lower() in matched or (c.int("userAccountControl", 0) or 0) & 0x2:
+            continue
+        report["ad_only"].append([c.str("sAMAccountName").rstrip("$") or c.name,
+                                  ou_path(parent_dn(c.dn), base) or "–",
+                                  c.str("operatingSystem") or "–",
+                                  f"ohne Lebenszeichen > {days} Tage" if stale(c, days) else "aktiv"])
     return report
 
 
@@ -83,14 +124,26 @@ def propose_coverage(ctx: Context, assets: list[Asset], index: NetboxIndex) -> i
         ("cov-stale", "Funkstille", "stale", ["Maschine", "Art", "Rolle", "Zuletzt gesehen", "Hinweis"],
          f"Letzter Kontakt laut Wazuh/Intune älter als {cfg.stale_days} Tage."),
     ]
+    if "no_ad" in report:
+        sections += [
+            ("cov-no-ad", "Ohne AD-Computerkonto", "no_ad", ["Maschine", "Art", "Plattform", "Rolle"],
+             f"Maschinen mit Plattform {', '.join(cfg.ad_platforms)} in Netbox, für die es im Active Directory kein "
+             f"Computerkonto gibt."),
+            ("cov-ad-only", "Nur im Active Directory", "ad_only", ["Computerkonto", "Container", "Betriebssystem",
+                                                                   "Status"],
+             "Aktivierte Computerkonten ohne Netbox-Eintrag – fehlt die Maschine in Netbox, oder ist das Konto "
+             "verwaist (Maschine abgebaut)?"),
+        ]
     summary = markdown.table(["Prüfung", "Befunde"], [[title, len(report[key])] for _, title, key, _, _ in sections])
     blocks = []
     text = narrative.assessment(
         ctx, "coverage", expert="IT-Betrieb, Asset-Management und Endpoint-Security",
-        subject="der Abdeckung von Wazuh, Intune und Netbox",
+        subject="der Abdeckung von Wazuh, Intune" + (", Active Directory" if "no_ad" in report else "") + " und Netbox",
         context=f"Wazuh-Pflicht für Netbox-Rollen: {', '.join(cfg.wazuh_roles)}\n"
                 f"Intune-Pflicht für Netbox-Rollen: {', '.join(cfg.intune_roles)}\n"
-                f"Funkstille ab: {cfg.stale_days} Tagen",
+                f"Funkstille ab: {cfg.stale_days} Tagen"
+                + (f"\nAD-Computerkonto-Pflicht für Plattformen: {', '.join(cfg.ad_platforms)}" if "no_ad" in report
+                   else ""),
         sections=[(title, headers, report[key]) for _, title, key, headers, _ in sections]) \
         if narrative.enabled(ctx, "audit") else None
     if text is not None:
@@ -102,6 +155,7 @@ def propose_coverage(ctx: Context, assets: list[Asset], index: NetboxIndex) -> i
     return propose_page(ctx, PageDraft(
         doc_type="coverage", title="Abdeckung: Wazuh, Intune, Netbox", description="Abdeckungsbericht der Discovery",
         blocks=blocks, target_path=ctx.cfg.wiki.paths.get("coverage") or "infrastruktur/abdeckung",
-        intro="Automatischer Abgleich zwischen Netbox, Wazuh, vCenter und Intune nach jeder Discovery.",
+        intro="Automatischer Abgleich zwischen Netbox, Wazuh, vCenter, Intune und (falls angebunden) dem Active "
+              "Directory nach jeder Discovery.",
         source="coverage", stable_id="coverage:report",
     ))

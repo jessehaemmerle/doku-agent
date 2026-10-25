@@ -92,6 +92,23 @@ def refresh(ctx: Context, stable_id: str) -> int | None:
                 raise SourceGone("GPO im Active Directory gelöscht") from exc
         if parts[1] in ad_docs.SLUG_AREA:
             return ad_docs.document_section(ctx, parts[1])
+    if source == "adcs" and ctx.cfg.ad.enabled:
+        if "certificates" not in ctx.cfg.ad.include:
+            raise Unsupported(stable_id)
+        from doku_agent.generators import ad_docs
+        return next((r for r in ad_docs.document_ad(ctx, ["certificates"]) if r), None)
+    if source == "addns" and ctx.cfg.ad.enabled:
+        if "dns" not in ctx.cfg.ad.include:
+            raise Unsupported(stable_id)
+        from doku_agent.generators import ad_docs
+        return next((r for r in ad_docs.document_ad(ctx, ["dns"]) if r), None)
+    if source.startswith("changes"):
+        if not ctx.cfg.changes.enabled:
+            raise Unsupported(stable_id)
+        from doku_agent import changes
+        if parts[1] == "index":
+            return changes.document_index(ctx)
+        return changes.document_week(ctx, changes.ref_from_slug(parts[2]))
     if source == "wazuh" and ctx.cfg.wazuh.enabled:
         from doku_agent.generators import wazuh_docs
         kind, rest = parts[1], ":".join(parts[2:])
