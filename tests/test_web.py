@@ -46,6 +46,25 @@ def test_start_job_and_view(client, ctx):
     assert "err=" in bad.headers["location"]
 
 
+def test_ad_area_run_buttons(client, ctx):
+    ctx.cfg.ad.enabled = True
+    html = client.get("/", auth=AUTH).text
+    assert 'value="ad|audit"' in html and "AD: Prüfung" in html
+    token = _csrf(client)
+    resp = client.post("/jobs", data={"name": "ad|audit", "csrf": token}, auth=AUTH, follow_redirects=False)
+    assert resp.status_code == 303
+    job = ctx.store.list_jobs()[0]
+    assert job.name == "ad" and job.params == {"areas": "audit"}
+    # unbekannter Bereich wird abgewiesen
+    bad = client.post("/jobs", data={"name": "ad|quatsch", "csrf": token}, auth=AUTH, follow_redirects=False)
+    assert "err=" in bad.headers["location"]
+
+
+def test_ad_area_buttons_hidden_when_ad_disabled(client, ctx):
+    ctx.cfg.ad.enabled = False
+    assert "ad|audit" not in client.get("/", auth=AUTH).text
+
+
 def test_review_edit_and_approve(client, ctx, fake_wiki):
     pid = propose_page(ctx, PageDraft(doc_type="netbox_device", title="srv01", description="d",
                                       blocks=[Block("netbox-device", "Steckbrief", "| a |")],

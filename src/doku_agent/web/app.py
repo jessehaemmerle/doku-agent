@@ -116,10 +116,19 @@ def create_app(ctx: Context) -> FastAPI:
     def healthz():
         return "ok"
 
+    def _area_runs() -> list[tuple[str, str]]:
+        """Schnellstart-Buttons für einzelne AD-Bereiche (nur wenn AD aktiv), z.B. nur die Prüfung.
+        Rückgabe: (Button-Wert "ad|<bereich>", Beschriftung)."""
+        if not ctx.cfg.ad.enabled:
+            return []
+        from doku_agent.generators.ad_common import AREA_LABELS
+        return [(f"ad|{a}", f"AD: {AREA_LABELS[a]}") for a in ctx.cfg.ad.include if a in AREA_LABELS]
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request, user: str = Depends(auth)):
         return render(request, "index.html", proposals=ctx.store.list_proposals("pending", 10),
-                      recent_jobs=ctx.store.list_jobs(8), startable=STARTABLE, schedule=ctx.cfg.schedule)
+                      recent_jobs=ctx.store.list_jobs(8), startable=STARTABLE, area_runs=_area_runs(),
+                      schedule=ctx.cfg.schedule)
 
     # --- Vorschläge -------------------------------------------------------
 
@@ -192,7 +201,8 @@ def create_app(ctx: Context) -> FastAPI:
 
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs(request: Request, user: str = Depends(auth)):
-        return render(request, "jobs.html", job_list=ctx.store.list_jobs(100), startable=STARTABLE)
+        return render(request, "jobs.html", job_list=ctx.store.list_jobs(100), startable=STARTABLE,
+                      area_runs=_area_runs())
 
     @app.get("/jobs/{jid}", response_class=HTMLResponse)
     def job(request: Request, jid: int, user: str = Depends(auth)):
@@ -203,9 +213,14 @@ def create_app(ctx: Context) -> FastAPI:
 
     @app.post("/jobs")
     def start_job(_: None = Depends(check_csrf), user: str = Depends(auth), name: str = Form(...)):
-        if name not in STARTABLE:
-            return _redirect("/jobs", f"Job {name} kann nicht direkt gestartet werden.", error=True)
-        jid = ctx.store.enqueue(name, {})
+        # Ein Button kann "<job>|<bereich>" senden, um nur einen Bereich eines Sammeljobs zu starten
+        # (z.B. "ad|audit" nur für die AD-Prüfung). Ohne Bereich läuft der ganze Job.
+        job, _sep, area = name.partition("|")
+        if job not in STARTABLE:
+            return _redirect("/jobs", f"Job {job} kann nicht direkt gestartet werden.", error=True)
+        if area and (job != "ad" or area not in ctx.cfg.ad.include):
+            return _redirect("/jobs", f"Bereich {area} kann nicht einzeln gestartet werden.", error=True)
+        jid = ctx.store.enqueue(job, {"areas": area} if area else {})
         return _redirect(f"/jobs/{jid}", "Job eingeplant – er startet, sobald der vorherige fertig ist.")
 
     @app.get("/auftrag", response_class=HTMLResponse)

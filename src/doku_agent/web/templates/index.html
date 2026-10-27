@@ -16,6 +16,13 @@
   <div class="grid-jobs">
     {% for name in startable %}<button type="submit" name="name" value="{{ name }}">{{ jobs[name][0] }}</button>{% endfor %}
   </div>
+  {% if area_runs %}
+  <h3>Nur einzelne AD-Bereiche</h3>
+  <p class="muted">Schneller als der ganze Active-Directory-Lauf, z.B. nur die Prüfung.</p>
+  <div class="grid-jobs">
+    {% for value, label in area_runs %}<button type="submit" name="name" value="{{ value }}">{{ label }}</button>{% endfor %}
+  </div>
+  {% endif %}
 </form>
 {% if schedule %}
 <p class="muted">Zeitplan: {% for e in schedule %}{{ jobs[e.job][0] if e.job in jobs else e.job }} um {{ e.at }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>

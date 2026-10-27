@@ -228,7 +228,8 @@ Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml
 - *Fragen*: Frage ans Wiki stellen, Antwort mit Quellen.
 - *Wiki-Lint*: letzter Prüfbericht, „Jetzt prüfen“ startet eine neue Prüfung.
 - *Jobs*: Läufe starten und Protokolle ansehen. Jobs laufen nacheinander, damit das Modell die CPU nicht doppelt
-  belegt.
+  belegt. Für Active Directory gibt es neben dem gesamten Lauf eigene Buttons je Bereich (u.a. **AD: Prüfung**,
+  **AD: Zertifikatsdienste**, **AD: DNS**) – damit lässt sich z.B. nur die Prüfung schnell neu erzeugen.
 - *Konventionen*: zeigt, was der Agent je Wiki-Bereich gelernt hat.
 - *Status*: Verbindungstest, erlaubte Hosts und Ignorierliste.
 
@@ -240,6 +241,7 @@ doku-agent run discovery                 # Netbox-Discovery jetzt ausführen
 doku-agent run wazuh_rules               # weitere: wazuh_decoders, wazuh_config, wazuh_sca, intune, fortigate,
                                          #          fortigate_netbox, switches, netbox_devices, wiki_index, wiki_lint
 doku-agent run entra                     # Entra ID komplett; nur Teile: --param areas=conditional_access,audit
+doku-agent run ad                        # Active Directory komplett; nur Teile: --param areas=audit (oder certificates, dns, …)
 doku-agent run fortigate --param device=fw-zentrale --param sections=policies,audit
 doku-agent run fortigate_netbox --param device=fw-zentrale   # Firewall in Netbox eintragen/abgleichen
 doku-agent run switches --param host=10.0.0.2                # ein Switch (ohne host: alle)
