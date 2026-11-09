@@ -29,6 +29,21 @@ def _reindex(ctx: Context, page_id: int) -> None:
         ctx.store.enqueue("wiki_index", {"page_id": page_id})
 
 
+def _refresh_meta(payload: dict, page) -> None:
+    """Tags, Beschreibung und Titel wie in propose_page aus dem aktuellen Stand der Seite neu bilden, damit eine
+    inzwischen im Wiki gemachte Änderung (z.B. entfernter Tag, neuer Titel) nicht überschrieben wird."""
+    agent_tags = payload.get("agent_tags", payload.get("tags", []))  # ältere Vorschläge ohne agent_tags
+    payload["tags"] = list(dict.fromkeys([*page.tags, *agent_tags]))
+    payload["description"] = page.description or payload.get("draft_description", payload.get("description", ""))
+    payload["title"] = payload.get("draft_title") or page.title
+
+
+def _require_markdown(page) -> None:
+    if page.content_type != "markdown":
+        raise ApplyError(f"/{page.path} ist inzwischen keine Markdown-Seite mehr ({page.content_type}) – der Agent "
+                         "ergänzt nur Markdown-Seiten. Vorschlag ablehnen oder Seite wieder auf Markdown umstellen.")
+
+
 def apply_wiki(ctx: Context, prop: Proposal) -> str:
     payload = dict(prop.payload)
     wiki = ctx.wiki
@@ -39,10 +54,11 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
                 # Freier Text bzw. von Hand bearbeitet: nicht automatisch zusammenführbar.
                 raise ApplyError(f"Unter /{payload['path']} gibt es inzwischen eine Seite. Bitte Pfad im Vorschlag "
                                  "ändern oder den Auftrag erneut ausführen, damit der Agent die Seite ergänzt.")
+            _require_markdown(existing)
             # Inzwischen angelegt: Agent-Blöcke einfügen und erneut zur Prüfung vorlegen.
             new, _ = merge_into(existing.content, _blocks(payload), payload.get("ops", []))
-            payload.update(action="update", page_id=existing.id, base_hash=sha(existing.content),
-                           tags=list(dict.fromkeys([*existing.tags, *payload["tags"]])))
+            _refresh_meta(payload, existing)
+            payload.update(action="update", page_id=existing.id, base_hash=sha(existing.content))
             return _requeue(ctx, prop, payload, existing.content, new,
                             "Seite existiert inzwischen – als Ergänzung neu berechnet, bitte erneut prüfen.")
         page_id = wiki.create_page(payload["path"], payload["title"], payload["content"],
@@ -59,8 +75,10 @@ def apply_wiki(ctx: Context, prop: Proposal) -> str:
         if payload.get("edited"):
             raise ApplyError("Die Seite wurde nach dem Vorschlag im Wiki geändert und der Vorschlag manuell "
                              "bearbeitet – bitte Vorschlag verwerfen und neu erzeugen.")
+        _require_markdown(page)
         new, _ = merge_into(page.content, _blocks(payload), payload.get("ops", []))
         new = markdown.replace_links(new, payload.get("replacements"))  # Link-Korrekturen des Wiki-Lint
+        _refresh_meta(payload, page)
         payload["base_hash"] = sha(page.content)
         return _requeue(ctx, prop, payload, page.content, new,
                         "Seite wurde zwischenzeitlich geändert – Vorschlag neu berechnet, bitte erneut prüfen.")
@@ -152,8 +170,11 @@ def apply_proposal(ctx: Context, pid: int) -> str:
     prop = ctx.store.get_proposal(pid)
     if prop is None:
         raise ApplyError(f"Vorschlag {pid} nicht gefunden")
-    if prop.status != "pending":
-        raise ApplyError(f"Vorschlag {pid} ist nicht offen (Status: {prop.status})")
+    # Erst beanspruchen, dann schreiben: eine zweite, gleichzeitige Freigabe findet den Vorschlag nicht mehr offen
+    if not ctx.store.transition_proposal(pid, ("pending",), "applying"):
+        current = ctx.store.get_proposal(pid)
+        raise ApplyError(f"Vorschlag {pid} ist nicht offen (Status: {current.status if current else 'gelöscht'})")
+    prop = ctx.store.get_proposal(pid)  # Stand nach dem Beanspruchen (z.B. gerade gespeicherte Auswahl)
     try:
         if prop.kind == "wiki_page":
             return apply_wiki(ctx, prop)
@@ -169,6 +190,10 @@ def reject_proposal(ctx: Context, pid: int, ignore: bool = False) -> None:
     prop = ctx.store.get_proposal(pid)
     if prop is None:
         raise ApplyError(f"Vorschlag {pid} nicht gefunden")
-    ctx.store.update_proposal(pid, status="rejected", result="Abgelehnt" + (" und dauerhaft ignoriert" if ignore else ""))
+    # Übernommene (oder gerade laufende) Vorschläge bleiben, wie sie sind: sonst ließen sie sich wieder öffnen
+    # und ein zweites Mal ausführen
+    if not ctx.store.transition_proposal(pid, ("pending", "failed", "rejected"), "rejected",
+                                         "Abgelehnt" + (" und dauerhaft ignoriert" if ignore else "")):
+        raise ApplyError(f"Vorschlag {pid} ist bereits übernommen und kann nicht mehr abgelehnt werden")
     if ignore and prop.dedup_key:
         ctx.store.ignore(prop.dedup_key, f"Vorschlag #{pid} abgelehnt: {prop.title}")

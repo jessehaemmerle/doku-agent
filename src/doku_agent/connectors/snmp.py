@@ -141,8 +141,13 @@ class SnmpClient:
                 async for err, status, _, binds in snmp.bulk_walk_cmd(
                         engine, auth, target, snmp.ContextData(), 0, 50,
                         snmp.ObjectType(snmp.ObjectIdentity(base)), lexicographicMode=False):
-                    if err or status:
-                        break  # Tabelle fehlt auf diesem Gerät (z.B. kein LLDP) – nicht fatal
+                    if err:  # Transportfehler, z.B. Zeitüberschreitung mitten in der Tabelle: halbe Tabellen
+                        # (etwa Portnamen) führten zu falschen Vorschlägen – lieber den Switch auslassen
+                        if "timeout" in str(err).lower():
+                            raise SnmpError(f"{self._timeout_message()} (beim Lesen der Tabelle {name})")
+                        raise SnmpError(f"{self.host}: {err} (beim Lesen der Tabelle {name})")
+                    if status:
+                        break  # Tabelle fehlt auf diesem Gerät (z.B. kein LLDP, SNMPv1: noSuchName) – nicht fatal
                     for oid, value in binds:
                         parts = tuple(oid)
                         if parts[:len(prefix)] != prefix:

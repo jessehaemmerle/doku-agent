@@ -202,6 +202,15 @@ class Store:
         with self._conn() as db:
             db.execute(sql, (*fields.values(), now(), pid))
 
+    def transition_proposal(self, pid: int, allowed: tuple[str, ...], status: str, result: str | None = None) -> bool:
+        """Status nur wechseln, solange er noch einer der erlaubten ist – atomar, damit zwei Freigaben (Doppelklick,
+        CLI und Oberfläche gleichzeitig) einen Vorschlag nicht zweimal ausführen. True, wenn gewechselt."""
+        marks = ", ".join("?" * len(allowed))
+        with self._conn() as db:
+            cur = db.execute(f"UPDATE proposals SET status=?, result=COALESCE(?, result), updated_at=? "
+                             f"WHERE id=? AND status IN ({marks})", (status, result, now(), pid, *allowed))
+            return cur.rowcount == 1
+
     def close_pending(self, dedup_key: str, result: str) -> None:
         """Offenen Vorschlag schließen, der sich erledigt hat (z.B. von Hand in Netbox korrigiert)."""
         with self._conn() as db:

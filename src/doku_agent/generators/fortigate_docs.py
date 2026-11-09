@@ -17,6 +17,8 @@ from doku_agent.connectors.fortigate import FortiGateClient
 from doku_agent.context import Context
 from doku_agent.generators import narrative
 from doku_agent.generators.common import MASK, STYLE_RULES, digest
+from doku_agent.generators.narrative import unverified
+from doku_agent.llm import LLMError
 from doku_agent.pages import Block, PageDraft, propose_page
 
 POLICY_BATCH = 6  # Regeln pro LLM-Aufruf (Kontextbudget eines 8B-Modells auf CPU)
@@ -304,21 +306,31 @@ def _explain(ctx: Context, data: FortiData, views: list[dict]) -> dict[str, str]
         else:
             missing.append((key, view))
     for i in range(0, len(missing), POLICY_BATCH):
+        if ctx.__dict__.get("_llm_down"):  # in diesem Lauf schon gescheitert: nicht je Gruppe neu warten
+            break
         batch = missing[i:i + POLICY_BATCH]
         text = json.dumps([view for _, view in batch], ensure_ascii=False, indent=1)
-        result = ctx.llm.json(
-            "Du bist Experte für FortiGate-Firewalls und dokumentierst ein Regelwerk für das IT-Team. " + STYLE_RULES,
-            "Erkläre für jede Firewall-Regel in 2-3 Sätzen, welcher Verkehr von wo nach wo erlaubt oder "
-            "verworfen wird und wofür sie dient – den Zweck nur, wenn er aus Name, Objekten oder Kommentar "
-            "hervorgeht. Nenne Auffälligkeiten wie 'beliebig'/'alle Dienste', fehlendes Logging, fehlende "
-            f"Sicherheitsprofile oder eine deaktivierte Regel.\n\nRegeln (JSON):\n{ctx.llm.fit(text)}",
-            EXPLAIN_SCHEMA,
-        )
+        try:
+            result = ctx.llm.json(
+                "Du bist Experte für FortiGate-Firewalls und dokumentierst ein Regelwerk für das IT-Team. "
+                + STYLE_RULES,
+                "Erkläre für jede Firewall-Regel in 2-3 Sätzen, welcher Verkehr von wo nach wo erlaubt oder "
+                "verworfen wird und wofür sie dient – den Zweck nur, wenn er aus Name, Objekten oder Kommentar "
+                "hervorgeht. Nenne Auffälligkeiten wie 'beliebig'/'alle Dienste', fehlendes Logging, fehlende "
+                f"Sicherheitsprofile oder eine deaktivierte Regel.\n\nRegeln (JSON):\n{ctx.llm.fit(text)}",
+                EXPLAIN_SCHEMA,
+            )
+        except LLMError as exc:  # sonst bräche der ganze FortiGate-Lauf ab (alle Abschnitte, VDOMs, Geräte)
+            ctx.__dict__["_llm_down"] = True
+            ctx.log.warning("Sprachmodell nicht erreichbar (%s) – Regeln ohne neue Erläuterungen", exc)
+            break
         answers = {str(item.get("id")): (item.get("erklaerung") or "").strip() for item in result.get("regeln", [])}
         for key, view in batch:
-            if answers.get(view["id"]):  # fehlende Antworten werden beim nächsten Lauf erneut erfragt
-                ctx.store.kv_set(key, answers[view["id"]])
-                out[view["id"]] = answers[view["id"]]
+            answer = answers.get(view["id"])
+            # fehlende oder nicht belegte Antworten werden beim nächsten Lauf erneut erfragt
+            if answer and not unverified(answer, json.dumps(view, ensure_ascii=False)):
+                ctx.store.kv_set(key, answer)
+                out[view["id"]] = answer
     return out
 
 
@@ -712,12 +724,17 @@ def _covered(outer: set, inner: tuple) -> bool:
 
 
 def covers(a: tuple[set, set], b: tuple[set, set], everything: tuple) -> bool:
-    """Deckt Menge a die Menge b vollständig ab? 'everything' sind die Intervalle für 'beliebig'."""
+    """Deckt Menge a die Menge b vollständig ab? 'everything' sind die Intervalle für 'beliebig' – bei Adressen je
+    Familie (IPv4-"all" deckt keine IPv6-Adressen ab), bei Diensten "ALL"."""
     a_iv, a_op = a
-    if any(_covered(a_iv, e) for e in everything):
-        return True  # a ist beliebig (IPv4 "all" bzw. IPv6 "all"): deckt alles, auch FQDN-/Länder-Objekte
     b_iv, b_op = b
-    return b_op <= a_op and all(_covered(a_iv, iv) for iv in b_iv)
+    full = {e[0] for e in everything if _covered(a_iv, e)}  # Familien, in denen a beliebig ist
+    if "all" in full:  # Dienst ALL
+        return True
+    if not all(iv[0] in full or _covered(a_iv, iv) for iv in b_iv):
+        return False
+    # nicht auflösbare Objekte (FQDN, Land, VIP …) deckt dasselbe Objekt oder "all" derselben Familie ab
+    return all(op in a_op or (6 if op.startswith("obj6:") else 4) in full for op in b_op)
 
 
 def _is_any(sets: tuple[set, set], everything: tuple) -> bool:
@@ -744,7 +761,8 @@ def audit(data: FortiData) -> dict[str, list]:
         simple = not any(p.get(k) == "enable" for k in ("srcaddr-negate", "dstaddr-negate", "service-negate",
                                                         "internet-service", "internet-service-src"))
         svc_any = _is_any(svc, svc_all) or all(_covered(svc[0], e) for e in tcp_udp_all)
-        if accept and _is_any(src, addr_all[:1]) and _is_any(dst, addr_all[:1]) and svc_any and simple:
+        any_family = any(_is_any(src, (fam,)) and _is_any(dst, (fam,)) for fam in addr_all)  # IPv4 oder IPv6
+        if accept and any_family and svc_any and simple:
             findings["any_any"].append([pid, name, f"{_join(names(p.get('srcintf')))} → {_join(names(p.get('dstintf')))}"])
         if accept and p.get("logtraffic") == "disable":
             findings["no_log"].append([pid, name])

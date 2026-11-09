@@ -57,9 +57,11 @@ def build_report(ctx: Context, assets: list[Asset], index: NetboxIndex) -> dict[
             report["no_wazuh"].append([name, kind, role, ", ".join(sorted(sources)) or "keine Quelle"])
         if role in cfg.intune_roles and "intune" not in sources:
             report["no_intune"].append([name, kind, role, ", ".join(sorted(sources)) or "keine Quelle"])
-        seen = str((obj.get("custom_fields") or {}).get(last_seen_field) or "")
-        if not seen and matched:
-            seen = max((netbox_fields.last_seen(a.sources, tz) or "" for a in matched), default="")
+        # Der Index stammt von vor diesem Lauf (bevor last_seen geschrieben wurde): der neuere Wert gilt, sonst
+        # stünde eine heute wieder aufgetauchte Maschine noch unter "Funkstille"
+        from_netbox = str((obj.get("custom_fields") or {}).get(last_seen_field) or "")[:10]
+        from_sources = max((netbox_fields.last_seen(a.sources, tz) or "" for a in matched), default="")[:10]
+        seen = max(from_netbox, from_sources)
         if seen and seen < threshold:
             power = next(((a.sources.get("vcenter") or {}).get("power_state") for a in matched
                           if (a.sources.get("vcenter") or {}).get("power_state")), "")

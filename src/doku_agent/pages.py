@@ -111,16 +111,21 @@ def _resolve_target(ctx: Context, draft: PageDraft) -> tuple[str, Page | None, A
         if style != "kebab":
             path = render_path(template, draft.path_vars, style)
     existing = conv.find_by_path(path)
+    by_name = False
     if existing is None and draft.lookup_name:
         existing = conv.find_by_name(draft.lookup_name)
+        if existing is not None and ctx.store.is_ignored(f"wiki:{existing.path}"):
+            existing = None  # Treffer nur über den Namen und dort abgewählt: eigene Seite anlegen
         if existing is not None:
+            by_name = True
             hints.append(f"Bestehende Seite /{existing.path} über den Namen '{draft.lookup_name}' gefunden "
                          f"– sie wird ergänzt statt /{path} neu anzulegen.")
             path = existing.path
     profile = conv.profile_for_path(path)
     page = ctx.wiki.get_page(existing.id) if existing else None
-    if page is not None and draft.stable_id:
-        # Zuordnung sofort merken, damit die Seite auch nach einer Umbenennung gefunden wird
+    if page is not None and draft.stable_id and not by_name:
+        # Zuordnung sofort merken, damit die Seite auch nach einer Umbenennung gefunden wird. Ein Treffer nur über
+        # den Namen kann falsch sein: er wird erst mit der Freigabe gemerkt (apply).
         ctx.store.kv_set(f"page-for:{draft.stable_id}", page.id)
     return path, page, profile, hints
 
@@ -195,6 +200,10 @@ def propose_page(ctx: Context, draft: PageDraft) -> int | None:
 
     payload["hints"] = hints
     payload["stable_id"] = draft.stable_id
+    # Was vom Agent stammt – beim Neuberechnen (Seite inzwischen geändert) mit dem aktuellen Stand neu verbinden
+    payload["agent_tags"] = tags
+    payload["draft_description"] = draft.description
+    payload["draft_title"] = draft.title if draft.sync_title and draft.title else None
     return ctx.store.add_proposal(
         "wiki_page", draft.title, payload, summary=summary, diff=diff, source=draft.source,
         dedup_key=f"wiki:{path}",

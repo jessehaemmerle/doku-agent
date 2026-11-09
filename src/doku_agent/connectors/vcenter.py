@@ -41,7 +41,7 @@ class VCenterClient:
         self.http = guard.client(cfg.url.rstrip("/"), verify=cfg.verify_tls, transport=transport, timeout=120)
         self._token: str | None = None
         self._vim_token: str | None = None
-        self._vim_login_failed = False
+        self._vim_login_failed = 0.0  # Zeitpunkt des letzten Fehlschlags (0 = keiner)
 
     # --- Automation API -----------------------------------------------------
 
@@ -108,7 +108,8 @@ class VCenterClient:
     def _vim_login(self) -> bool:
         if self._vim_token:
             return True
-        if self._vim_login_failed or not self.cfg.vijson_release:
+        # Fehlschlag nicht für die ganze Laufzeit merken (der Client lebt über Jobs hinweg), nur einige Minuten
+        if not self.cfg.vijson_release or (self._vim_login_failed and time.time() - self._vim_login_failed < 900):
             return False
         resp = self._vim("ServiceInstance/ServiceInstance/content")
         manager = (resp.json().get("sessionManager") or {}).get("value") if resp.status_code == 200 else None
@@ -117,7 +118,7 @@ class VCenterClient:
                              {"userName": self.cfg.username, "password": self.cfg.password})
             if resp.status_code == 200:
                 self._vim_token = resp.headers.get(SESSION_HEADER) or (resp.json() or {}).get("key")
-        self._vim_login_failed = not self._vim_token
+        self._vim_login_failed = 0.0 if self._vim_token else time.time()
         return bool(self._vim_token)
 
     def host_hardware(self, host_id: str) -> dict:
@@ -125,6 +126,11 @@ class VCenterClient:
         if not self._vim_login():
             return {}
         resp = self._vim(f"HostSystem/{host_id}/hardware")
+        if resp.status_code == 401:  # Sitzung abgelaufen (wie im REST-Pfad): einmal neu anmelden
+            self._vim_token = None
+            if not self._vim_login():
+                return {}
+            resp = self._vim(f"HostSystem/{host_id}/hardware")
         if resp.status_code != 200:
             return {}
         info = resp.json().get("systemInfo") or {}

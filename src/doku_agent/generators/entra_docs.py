@@ -763,6 +763,22 @@ def _covers(policy: dict, role: str | None) -> bool:
     return "All" in (users.get("includeUsers") or []) or (role is not None and role in (users.get("includeRoles") or []))
 
 
+def _includes(users: dict, uid: str, roles: set[str], member_ids) -> bool | None:
+    """Schließt die Richtlinie das Konto ein (alle Benutzer, direkt, über eine Rolle oder Gruppe)?
+    None, wenn das an nicht lesbaren Gruppenmitgliedern hängt."""
+    include_users = users.get("includeUsers") or []
+    if "All" in include_users or uid in include_users or roles & set(users.get("includeRoles") or []):
+        return True
+    unknown = False
+    for group in users.get("includeGroups") or []:
+        members = member_ids(group)
+        if members is None:
+            unknown = True
+        elif uid in members:
+            return True
+    return None if unknown else False
+
+
 def _legacy_blocked(data: EntraData) -> list[str]:
     hits = []
     for p in _enabled(data):
@@ -828,18 +844,22 @@ def audit(ctx: Context, data: EntraData, names: Names) -> dict[str, list[list]]:
     accounts, problems = _breakglass_ids(ctx, names) if ctx.cfg.entra.breakglass else ({}, [])
     f["breakglass"] += problems
     if accounts:
+        roles: dict[str, set[str]] = {}  # Konto -> Rollen (aktiv oder per PIM berechtigt: vorsichtshalber beide)
+        for a in [*data.assignments, *(data.eligibilities or [])]:
+            roles.setdefault(a.get("principalId", ""), set()).add(a.get("roleDefinitionId", ""))
         for p in enabled:
             users = (p.get("conditions") or {}).get("users") or {}
             excluded_groups = users.get("excludeGroups") or []
             for uid, upn in accounts.items():
-                if uid in (users.get("excludeUsers") or []):
-                    continue
+                included = _includes(users, uid, roles.get(uid, set()), ctx.entra.member_ids)
+                if included is False or uid in (users.get("excludeUsers") or []):
+                    continue  # Richtlinie betrifft das Konto nicht (z.B. nur Gruppe "Vertrieb") oder nimmt es aus
                 members = [ctx.entra.member_ids(g) for g in excluded_groups]
                 if any(m is not None and uid in m for m in members):
                     continue
-                unknown = any(m is None for m in members)
+                unknown = any(m is None for m in members) or included is None
                 f["breakglass"].append([upn, f"nicht ausgenommen in „{p.get('displayName')}“" + (
-                    " (Mitglieder ausgenommener Gruppen nicht lesbar)" if unknown else "")])
+                    " (Gruppenmitglieder nicht lesbar)" if unknown else "")])
     elif not ctx.cfg.entra.breakglass and enabled:
         counts: dict[str, int] = {}
         for p in enabled:

@@ -198,6 +198,7 @@ class _Builder:
             host = host_device_for(self.asset, self.index)
             current_host = (self.obj.get("device") or {}).get("name") or ""
             before.append(current_host or "–")
+            host_ok = False  # Host steht in Netbox schon im Ziel-Cluster
             if host is None:
                 self.hints.append(f"ESXi-Host {vc['host']} ist nicht in Netbox – VM ohne Host-Zuordnung.")
                 after.append(current_host or "–")
@@ -206,11 +207,13 @@ class _Builder:
                                   f"{cluster or current_cluster} – Host-Zuordnung folgt nach dessen Abgleich.")
                 after.append(current_host or "–")
             else:
+                host_ok = True
                 after.append(host.get("name"))
                 if (self.obj.get("device") or {}).get("id") != host["id"]:
                     data["device"] = host["id"]
-            if "cluster" in data and "device" not in data and self.obj.get("device"):
+            if "cluster" in data and "device" not in data and self.obj.get("device") and not host_ok:
                 data["device"] = None  # alter Host liegt im alten Cluster – sonst lehnt Netbox ab
+                after[-1] = "–"
         if data:
             steps.append(self.update(data, "Cluster/Host setzen"))
             self.add("placement", "vcenter", "Cluster / Host" if self.vm else "Cluster", " / ".join(before),
@@ -311,7 +314,11 @@ class _Builder:
             host = _host(cidr)
             if host in ip_by_host:
                 continue
-            existing = self.nb.find_one("ipam/ip-addresses", address=host)
+            matches = self.nb.list("ipam/ip-addresses", address=host)
+            if len(matches) > 1:  # find_one hielte sie für nicht vorhanden und legte ein weiteres Duplikat an
+                self.hints.append(f"IP {cidr} gibt es in Netbox mehrfach (z.B. in mehreren VRFs) – nicht übernommen.")
+                continue
+            existing = matches[0] if matches else None
             assignment = {"assigned_object_type": self.obj_type, "assigned_object_id": if_id}
             key = f"ip:{host}"
             ref = f"{key}_ip"

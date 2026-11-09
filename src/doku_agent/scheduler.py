@@ -8,7 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from doku_agent.context import Context
-from doku_agent.jobs import JOBS
+from doku_agent.jobs import JOBS, STARTABLE
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,12 @@ class Scheduler(threading.Thread):
         unknown = [e.job for e in ctx.cfg.schedule if e.job not in JOBS]
         if unknown:
             raise ValueError(f"Unbekannte Jobs im Zeitplan: {unknown}")
+        # Zeitplan-Einträge haben keine Parameter: Jobs wie netbox_device (id) oder freeform (instruction) würden
+        # jede Nacht scheitern
+        needs_params = [e.job for e in ctx.cfg.schedule if e.job not in STARTABLE]
+        if needs_params:
+            raise ValueError(f"Diese Jobs brauchen Parameter und lassen sich nicht planen: {needs_params} "
+                             f"(planbar: {', '.join(STARTABLE)})")
         # Beim Start nichts nachholen, was heute schon vorbei ist.
         now = datetime.now(self.tz)
         for idx, entry in enumerate(ctx.cfg.schedule):

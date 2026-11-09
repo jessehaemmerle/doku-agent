@@ -316,10 +316,15 @@ def test_page_mapping_survives_wiki_errors(sctx, nbf, fake_wiki):
     from doku_agent.generators.netbox_docs import document_object
     from doku_agent.wiki import WikiError
 
+    from doku_agent.apply import apply_proposal
+
     dev = _device(nbf, name="srv-x", serial="ABC123", status={"value": "active", "label": "Active"})
     page_id = fake_wiki.add("it/irgendwo/srv-x", "srv-x", "Alt\n", [])  # bestehende Seite, Name passt
-    document_object(sctx, "device", dev["id"])
-    assert sctx.store.kv_get(f"page-for:netbox:device:{dev['id']}") == page_id  # beim Finden gemerkt
+    pid = document_object(sctx, "device", dev["id"])
+    # nur über den Namen gefunden (kann falsch sein): erst mit der Freigabe gemerkt
+    assert sctx.store.kv_get(f"page-for:netbox:device:{dev['id']}") is None
+    apply_proposal(sctx, pid)
+    assert sctx.store.kv_get(f"page-for:netbox:device:{dev['id']}") == page_id
 
     original = fake_wiki.handler
     fake_wiki.handler = lambda request: httpx.Response(500, text="kaputt")

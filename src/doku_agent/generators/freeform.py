@@ -9,7 +9,7 @@ from doku_agent import markdown
 from doku_agent.context import Context
 from doku_agent.conventions import slugify
 from doku_agent.extract import extract_text
-from doku_agent.generators.common import style_context
+from doku_agent.generators.common import scrub_text, style_context
 from doku_agent.pages import PageDraft, propose_page
 from doku_agent.wiki import normalize_path
 
@@ -31,6 +31,7 @@ CONTENT_SCHEMA = {
     "required": ["inhalt"],
 }
 RAW_NOTES_LIMIT = 30000  # Zeichen der Rohnotizen, die bei schwacher Modellantwort übernommen werden
+SCRUBBED_HINT = "Mögliche Kennwörter, Schlüssel oder Tokens in den Eingaben wurden als *** ausgeblendet."
 
 OPS_SCHEMA = {
     "type": "object",
@@ -58,13 +59,18 @@ def safe_area(area: str) -> str:
 
 
 def gather_material(ctx: Context, instruction: str, files: list[Path]) -> tuple[str, list[str]]:
+    """Notizen und Dateitexte; Kennwörter, Schlüssel und Tokens werden ausgeblendet, bevor sie an das
+    Sprachmodell oder (als Rohfassung) in die Seite gehen."""
     parts, hints = [f"Auftrag/Notizen:\n{instruction.strip()}"], []
     for f in files:
         try:
             parts.append(f"--- Datei {f.name} ---\n{extract_text(f)}")
         except Exception as exc:
             hints.append(f"Datei {f.name} übersprungen: {exc}")
-    return "\n\n".join(parts), hints
+    material, scrubbed = scrub_text("\n\n".join(parts))
+    if scrubbed:
+        hints.append(SCRUBBED_HINT)
+    return material, hints
 
 
 def _candidates(ctx: Context, instruction: str, material: str) -> list:
@@ -115,7 +121,10 @@ def _decide(ctx: Context, instruction: str, material: str) -> dict:
 
 
 def run_freeform(ctx: Context, instruction: str, files: list[Path] | None = None, target_path: str = "") -> int | None:
+    instruction, scrubbed = scrub_text(instruction)  # geht auch einzeln in Prompts (Entscheidung, Verdichtung)
     raw_material, hints = gather_material(ctx, instruction, files or [])
+    if scrubbed and SCRUBBED_HINT not in hints:
+        hints.append(SCRUBBED_HINT)
     material = ctx.llm.condense(raw_material, instruction)
     conv = ctx.conventions
 

@@ -308,10 +308,11 @@ def test_new_firewall_rule_only_explains_itself(ctx):
         def json(self, system, user, schema):
             rules = json.loads(user.split("Regeln (JSON):\n", 1)[1])
             asked.append([r["id"] for r in rules])
-            return {"regeln": [{"id": r["id"], "erklaerung": f"E{r['id']}"} for r in rules]}
+            # belegbare Antworten (die Faktenprüfung verwirft Angaben, die nicht in der Regel stehen)
+            return {"regeln": [{"id": r["id"], "erklaerung": f"Regel {r['id']}: {r['name']}."} for r in rules]}
 
     ctx.__dict__["llm"] = LLM()
     assert len(fd._explain(ctx, data, views)) == 12 and len(asked) == 2
     asked.clear()
     out = fd._explain(ctx, data, [{"id": "99", "name": "neu"}, *views])
-    assert asked == [["99"]] and out["99"] == "E99" and out["12"] == "E12"
+    assert asked == [["99"]] and out["99"] == "Regel 99: neu." and out["12"] == "Regel 12: r12."

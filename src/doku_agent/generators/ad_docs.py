@@ -485,6 +485,9 @@ def audit(ctx: Context, data: AdData, names: AdNames) -> dict[str, list[list]]:
             for where in files.cpassword:
                 f["gpo"].append([name, f"gespeichertes Kennwort in den Einstellungen ({where}) – mit öffentlich bekanntem "
                                        f"Schlüssel lesbar (MS14-025), entfernen und Kennwort ändern"])
+            for where in files.cmd_secrets:
+                f["gpo"].append([name, f"Kennwort im Aufruf ({where}) – in SYSVOL für jeden Domänenbenutzer lesbar, "
+                                       f"entfernen und Kennwort ändern"])
         if not g.str("gPCMachineExtensionNames") and not g.str("gPCUserExtensionNames") and c == u == 0:
             f["gpo"].append([name, "leer (keine Einstellungen)"])
         path = g.str("gPCFileSysPath").lower()

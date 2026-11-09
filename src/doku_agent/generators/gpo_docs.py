@@ -364,6 +364,14 @@ class GpoFiles:
         return [f"{scope}: {area} – {item.name}" for scope, groups in self.prefs.items() for area, items in groups
                 for item in items if item.has_cpassword]
 
+    @property
+    def cmd_secrets(self) -> list[str]:
+        """Skripte, Aufgaben und Verknüpfungen mit Kennwort im Aufruf (Kennwort selbst ist ausgeblendet)."""
+        out = [f"{scope}: Skript {s.command}" for scope, scripts in self.scripts.items() for s in scripts
+               if s.has_secret]
+        return out + [f"{scope}: {area} – {item.name}" for scope, groups in self.prefs.items() for area, items in groups
+                      for item in items if item.has_cmd_secret]
+
 
 SCOPES = {"machine": "Machine", "user": "User"}
 KNOWN = {"gpt.ini", "registry.pol", "gpttmpl.inf", "audit.csv", "scripts.ini", "psscripts.ini", "comment.cmtx",
@@ -576,6 +584,23 @@ def _firewall_rows(entries: list) -> list[list]:
     return rows
 
 
+def _member(names: AdNames, name: str, sid: str) -> str:
+    """Mitglied einer lokalen Gruppe (Preferences): über die SID, sonst über den Namen; im Modus count ohne
+    Personennamen, auch wenn nur der Name eingetragen ist."""
+    if sid and (names.mode == "count" or not name):
+        return names.sid(sid)
+    if names.mode == "count" and name:
+        return names.principal(name)
+    return name or "?"
+
+
+def _replace_users(text: str, hidden: dict[str, str]) -> str:
+    for user, label in hidden.items():
+        if text.endswith(f"User: {user}"):
+            return text[:len(text) - len(user)] + label
+    return text
+
+
 def scope_markdown(scope: str, files: GpoFiles, catalog, names: AdNames) -> tuple[str, list[str], int]:
     """Einstellungen eines Teils (Machine/User): (Markdown, Faktenzeilen, Anzahl Einstellungen)."""
     parts, facts, count = [], [], 0
@@ -630,7 +655,8 @@ def scope_markdown(scope: str, files: GpoFiles, catalog, names: AdNames) -> tupl
     if scripts:
         kinds = {"startup": "Start", "shutdown": "Herunterfahren", "logon": "Anmeldung", "logoff": "Abmeldung"}
         rows = [[kinds.get(s.kind.lower(), s.kind) + (" (PowerShell)" if s.powershell else ""), s.command,
-                 s.parameters or "–"] for s in scripts]
+                 (s.parameters or "–") + (" – **Kennwort im Aufruf (ausgeblendet)**" if s.has_secret else "")]
+                for s in scripts]
         parts.append("### Skripte\n\n" + markdown.table(["Zeitpunkt", "Skript", "Parameter"], rows))
         facts += [f"Skript beim {r[0]}: {r[1]} {r[2] if r[2] != '–' else ''}".strip() for r in rows]
         count += len(rows)
@@ -651,12 +677,17 @@ def scope_markdown(scope: str, files: GpoFiles, catalog, names: AdNames) -> tupl
                 details.append(f"{PREF_LABELS.get(k, k)}: {v}")
             if item.members:
                 details.append("Mitglieder: " + ", ".join(
-                    f"{action}: {names.sid(sid) if sid and (names.mode == 'count' or not name) else name or '?'}"
-                    for action, name, sid in item.members))
+                    f"{action}: {_member(names, name, sid)}" for action, name, sid in item.members))
             if item.has_cpassword:
                 details.append("**gespeichertes Kennwort (cpassword)**")
+            if item.has_cmd_secret:
+                details.append("**Kennwort im Aufruf (ausgeblendet)**")
+            filters = item.filters
+            if names.mode == "count" and item.filter_users:  # Zielgruppe "Benutzer X": keine Personennamen
+                hidden = {u: names.principal(u) for u in item.filter_users}
+                filters = [_replace_users(f, hidden) for f in filters]
             rows.append([area, item.name + (" (deaktiviert)" if item.disabled else ""), item.action or "–",
-                         "<br>".join(details) or "–", "<br>".join(item.filters) or "–"])
+                         "<br>".join(details) or "–", "<br>".join(filters) or "–"])
     if rows:
         parts.append("### Einstellungen (Preferences)\n\n" + markdown.table(
             ["Bereich", "Element", "Aktion", "Details", "Zielgruppenadressierung"], rows))

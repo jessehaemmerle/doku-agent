@@ -86,9 +86,15 @@ def upsert_block(md: str, block_id: str, content: str, heading: str | None = Non
     sonst als neuer Abschnitt vor den Abschnitt mit dem Block `before_block` (falls vorhanden) bzw. ans Ende."""
     begin, end = block_markers(block_id)
     body = f"{begin}\n{content.strip()}\n{end}"
-    if begin in md and end in md:
-        pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end), re.S)
-        return pattern.sub(lambda _: body, md, count=1)
+    start = md.find(begin)
+    if start != -1:
+        stop = md.find(end, start + len(begin))
+        if stop != -1:
+            return md[:start] + body + md[stop + len(end):]
+        # Endmarke fehlt (z.B. beim Bearbeiten gelöscht): den Block an Stelle der Anfangsmarke neu einsetzen. Der
+        # Text dahinter bleibt stehen – sonst reichte der Block beim nächsten Lauf bis zu einer späteren Endmarke
+        # und löschte, was dazwischen steht.
+        return md[:start] + body + md[start + len(begin):]
     if heading:
         sec = find_section(md, heading)
         if sec is not None:
@@ -232,7 +238,8 @@ def _editable_lines(lines: list[str]) -> list[bool]:
             marker_text = m.group(1)
             if not fence:
                 fence = marker_text
-            elif marker_text[0] == fence[0] and len(marker_text) >= len(fence):
+            elif (marker_text[0] == fence[0] and len(marker_text) >= len(fence)
+                  and not line.strip()[len(marker_text):]):  # schließt nur ohne Info-String, wie _heading_lines
                 fence = ""
             out.append(False)
             continue

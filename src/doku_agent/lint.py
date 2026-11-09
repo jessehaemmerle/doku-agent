@@ -100,8 +100,11 @@ def refresh(ctx: Context, stable_id: str) -> int | None:
     if source == "addns" and ctx.cfg.ad.enabled:
         if "dns" not in ctx.cfg.ad.include:
             raise Unsupported(stable_id)
-        from doku_agent.generators import ad_docs
-        return next((r for r in ad_docs.document_ad(ctx, ["dns"]) if r), None)
+        from doku_agent.generators import dns_docs
+        try:  # nur diese Seite – nicht den ganzen DNS-Bereich je zugeordneter Seite
+            return dns_docs.refresh(ctx, stable_id)
+        except dns_docs.ZoneGone as exc:
+            raise SourceGone(str(exc)) from exc
     if source.startswith("changes"):
         if not ctx.cfg.changes.enabled:
             raise Unsupported(stable_id)
@@ -292,15 +295,20 @@ def run_lint(ctx: Context) -> dict:
                 continue
             page = next(p for p in checked if p.path == d["path"])
             if page.id not in content_cache:
-                content_cache[page.id] = markdown.link_targets(ctx.wiki.get_page(page.id).content)
+                full = ctx.wiki.get_page(page.id)
+                # Visual-Editor-Seiten (HTML) korrigiert der Agent nicht – dann auch keinen Link-Vorschlag melden
+                content_cache[page.id] = markdown.link_targets(full.content) if full.content_type == "markdown" else []
             for href in content_cache[page.id]:
                 if resolve_href(href, page.path, page.locale or cfg.wiki.locale) == dead:
                     anchor = href[href.index("#"):] if "#" in href else ""
                     explicit = href.startswith("/") and dead.split("/")[0] == href.strip("/").split("/")[0]
                     new = f"/{dead.split('/')[0]}/{target}" if explicit else f"/{target}"
+                    if resolve_href(new, page.path, page.locale or cfg.wiki.locale) not in existing:
+                        continue  # Ersatz wäre selbst tot (Ziel stammt aus der Standardsprache, Link nennt eine andere)
                     entry = fixes.setdefault(page.id, {"links": {}, "tags": [], "notes": []})
                     entry["links"][href] = new + anchor
                     entry["notes"].append(f"Link {href} → {new + anchor} ({why})")
+                    d["fixed"] = True
     from doku_agent import semantic
     load_vectors = functools.cache(lambda: semantic.page_vectors(ctx))
     if cfg.lint.suggest_tags:
@@ -318,7 +326,8 @@ def run_lint(ctx: Context) -> dict:
             report["errors"].append(f"Korrektur für /{by_id[pid].path}: {exc}")
     for d in report["dead_links"]:
         page = next((p for p in checked if p.path == d["path"]), None)
-        d["proposal"] = fix_proposals.get(page.id) if page and d.get("fix") else None
+        # nur verlinken, wenn der Vorschlag diesen Link wirklich ändert (nicht bloß Tags ergänzt)
+        d["proposal"] = fix_proposals.get(page.id) if page and d.pop("fixed", False) else None
 
     # --- Dubletten --------------------------------------------------------
     managed = {}
@@ -341,18 +350,24 @@ def run_lint(ctx: Context) -> dict:
                                                  "reason": "gleicher Titel"})
     try:
         if semantic.is_ready(ctx):
+            import numpy as np
+
             ids, vectors = load_vectors()
-            sims = vectors @ vectors.T
+            keep = [k for k, pid in enumerate(ids) if pid in checked_ids]
+            ids, vectors = [ids[k] for k in keep], vectors[keep]
             candidates = []
-            for i, a in enumerate(ids):
-                for j in range(i + 1, len(ids)):
-                    b = ids[j]
-                    score = float(sims[i, j])
-                    if score < cfg.lint.duplicate_threshold or a not in checked_ids or b not in checked_ids:
+            # blockweise statt n×n in Python: bei Tausenden Seiten sonst Millionen Schleifendurchläufe und eine
+            # riesige Matrix im Speicher
+            for start in range(0, len(ids), 512):
+                block = vectors[start:start + 512] @ vectors.T
+                for r, j in zip(*np.nonzero(block >= cfg.lint.duplicate_threshold)):
+                    i = start + int(r)
+                    if j <= i:
                         continue
+                    a, b = ids[i], ids[int(j)]
                     if (min(a, b), max(a, b)) in seen_pairs or distinct_sources(a, b):
                         continue
-                    candidates.append((score, a, b))
+                    candidates.append((float(block[r, j]), a, b))
             for score, a, b in sorted(candidates, reverse=True)[:MAX_DUPLICATES]:
                 report["duplicates"].append({"a": by_id[a].path, "a_title": by_id[a].title, "b": by_id[b].path,
                                              "b_title": by_id[b].title, "reason": f"ähnlicher Inhalt ({score:.2f})"})

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -27,7 +29,7 @@ from doku_agent.netbox_sync import CATEGORY_LABELS
 HERE = Path(__file__).parent
 CSRF_COOKIE = "doku_csrf"
 STATUS_LABELS = {"pending": "offen", "applied": "übernommen", "rejected": "abgelehnt", "failed": "fehlgeschlagen",
-                 "queued": "wartet", "running": "läuft", "done": "fertig"}
+                 "applying": "wird übernommen", "queued": "wartet", "running": "läuft", "done": "fertig"}
 
 
 def diff_lines(diff: str) -> list[tuple[str, str]]:
@@ -152,6 +154,9 @@ def create_app(ctx: Context) -> FastAPI:
         prop = ctx.store.get_proposal(pid)
         if prop is None:
             raise HTTPException(404, "Vorschlag nicht gefunden")
+        if prop.status != "pending":  # z.B. alter Tab: Formularwerte nicht in einen erledigten Vorschlag schreiben
+            return _redirect(f"/vorschlaege/{pid}", f"Vorschlag ist nicht mehr offen "
+                             f"({STATUS_LABELS.get(prop.status, prop.status)}).", error=True)
         if version and version != prop.updated_at:
             # Ein Lauf hat den Vorschlag neu berechnet, während die Seite offen war.
             return _redirect(f"/vorschlaege/{pid}", "Der Vorschlag wurde inzwischen aktualisiert – bitte erneut "
@@ -186,15 +191,27 @@ def create_app(ctx: Context) -> FastAPI:
 
     @app.post("/vorschlaege/{pid}/ablehnen")
     def reject(pid: int, _: None = Depends(check_csrf), user: str = Depends(auth), ignore: str = Form("")):
-        reject_proposal(ctx, pid, ignore=bool(ignore))
+        try:
+            reject_proposal(ctx, pid, ignore=bool(ignore))
+        except ApplyError as exc:
+            return _redirect(f"/vorschlaege/{pid}" if ctx.store.get_proposal(pid) else "/vorschlaege", str(exc),
+                             error=True)
         return _redirect("/vorschlaege", f"Vorschlag #{pid} abgelehnt" + (" und ignoriert." if ignore else "."))
 
     @app.post("/vorschlaege/{pid}/wieder-oeffnen")
     def reopen(pid: int, _: None = Depends(check_csrf), user: str = Depends(auth)):
         prop = ctx.store.get_proposal(pid)
-        if prop is None or prop.status not in ("failed", "rejected"):
-            return _redirect(f"/vorschlaege/{pid}", "Nur abgelehnte oder fehlgeschlagene Vorschläge.", error=True)
-        ctx.store.update_proposal(pid, status="pending", result="Wieder geöffnet")
+        allowed = ("failed", "rejected")
+        # "applying" bleibt nur nach einem Absturz mitten im Übernehmen stehen; solange es frisch ist, läuft es noch
+        if prop is not None and prop.status == "applying":
+            started = datetime.fromisoformat(prop.updated_at)
+            if datetime.now(timezone.utc) - started < timedelta(minutes=10):
+                return _redirect(f"/vorschlaege/{pid}", "Der Vorschlag wird gerade übernommen – bitte warten.",
+                                 error=True)
+            allowed += ("applying",)
+        if not ctx.store.transition_proposal(pid, allowed, "pending", "Wieder geöffnet"):
+            return _redirect(f"/vorschlaege/{pid}", "Nur abgelehnte, fehlgeschlagene oder abgebrochene Vorschläge.",
+                             error=True)
         return _redirect(f"/vorschlaege/{pid}", "Vorschlag wieder geöffnet.")
 
     # --- Jobs & Aufträge --------------------------------------------------
@@ -235,17 +252,24 @@ def create_app(ctx: Context) -> FastAPI:
         if not instruction.strip():
             return _redirect("/auftrag", "Bitte beschreibe, was dokumentiert werden soll.", error=True)
         upload_dir = ctx.cfg.upload_dir / uuid.uuid4().hex
-        saved = []
+        saved, used = [], set()
         for upload in files or []:
             if not upload.filename:
                 continue
             upload_dir.mkdir(parents=True, exist_ok=True)
-            target = upload_dir / (Path(upload.filename).name or "datei")
+            name = Path(upload.filename).name
+            if name in ("", ".", ".."):
+                name = "datei"
+            stem, suffix, n = Path(name).stem, Path(name).suffix, 2
+            while name.lower() in used:  # gleichnamige Dateien aus verschiedenen Ordnern nicht überschreiben
+                name, n = f"{stem} ({n}){suffix}", n + 1
+            used.add(name.lower())
             data = await upload.read(MAX_BYTES + 1)
             if len(data) > MAX_BYTES:
+                shutil.rmtree(upload_dir, ignore_errors=True)  # schon gespeicherte Dateien nicht liegen lassen
                 return _redirect("/auftrag", f"{upload.filename} ist größer als 20 MB.", error=True)
-            target.write_bytes(data)
-            saved.append(str(target))
+            (upload_dir / name).write_bytes(data)
+            saved.append(str(upload_dir / name))
         jid = ctx.store.enqueue("freeform", {"instruction": instruction.strip(), "target_path": target_path.strip(),
                                              "files": saved, "upload_dir": str(upload_dir)})
         return _redirect(f"/jobs/{jid}", "Auftrag eingeplant. Das Ergebnis erscheint als Vorschlag.")

@@ -8,7 +8,8 @@ Formate (Microsoft-Protokolldokumentation):
   Preferences/*.xml MS-GPPREF Einstellungen (Laufwerke, lokale Gruppen, Aufgaben, Registrierung …)
   *.admx / *.adml             Namen der administrativen Vorlagen (Central Store PolicyDefinitions)
 
-Kennwörter aus Preferences (cpassword, MS14-025) werden nie ausgegeben, nur als Befund gemeldet.
+Kennwörter aus Preferences (cpassword, MS14-025) werden nie ausgegeben, nur als Befund gemeldet; ebenso
+Kennwörter in Aufrufen von Skripten, Aufgaben und Verknüpfungen (ausgeblendet, als Befund gemeldet).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
-from doku_agent.generators.common import mask_value
+from doku_agent.generators.common import mask_value, scrub_command
 
 REG_TYPES = {0: "REG_NONE", 1: "REG_SZ", 2: "REG_EXPAND_SZ", 3: "REG_BINARY", 4: "REG_DWORD",
              5: "REG_DWORD_BIG_ENDIAN", 6: "REG_LINK", 7: "REG_MULTI_SZ", 11: "REG_QWORD"}
@@ -246,8 +247,9 @@ def parse_gpttmpl(data: bytes) -> SecurityTemplate:
 class Script:
     kind: str  # Startup, Shutdown, Logon, Logoff
     command: str
-    parameters: str
+    parameters: str  # Kennwörter darin sind bereits ausgeblendet
     powershell: bool
+    has_secret: bool = False  # Kennwort im Aufruf (für jeden Domänenbenutzer in SYSVOL lesbar)
 
 
 def parse_scripts_ini(data: bytes, powershell: bool = False) -> list[Script]:
@@ -259,7 +261,9 @@ def parse_scripts_ini(data: bytes, powershell: bool = False) -> list[Script]:
         values = {k.lower(): v for k, v in entries}
         n = 0
         while f"{n}cmdline" in values:
-            out.append(Script(section, values[f"{n}cmdline"], values.get(f"{n}parameters", ""), powershell))
+            command, in_command = scrub_command(values[f"{n}cmdline"])
+            params, in_params = scrub_command(values.get(f"{n}parameters", ""), values[f"{n}cmdline"])
+            out.append(Script(section, command, params, powershell, in_command or in_params))
             n += 1
     return out
 
@@ -341,6 +345,8 @@ class PrefItem:
     has_cpassword: bool = False
     filters: list[str] = field(default_factory=list)  # Zielgruppenadressierung (Item-Level Targeting)
     members: list[tuple[str, str, str]] = field(default_factory=list)  # lokale Gruppe: (Aktion, Name, SID)
+    has_cmd_secret: bool = False  # Kennwort in Befehl/Argumenten (z.B. geplante Aufgabe), ausgeblendet
+    filter_users: list[str] = field(default_factory=list)  # Konten aus FilterUser (im Modus count ausblenden)
 
 
 def _local(tag: str) -> str:
@@ -362,19 +368,28 @@ def _filters(elem: ET.Element) -> list[str]:
     return out
 
 
-def _task_summary(props: ET.Element) -> list[tuple[str, str]]:
-    out = []
+def _task_summary(props: ET.Element) -> tuple[list[tuple[str, str]], bool]:
+    """Kurzbeschreibung einer geplanten Aufgabe; Kennwörter in Befehl/Argumenten ausgeblendet.
+    Rückgabe: (Details, ob ein Kennwort im Aufruf stand)."""
+    out, secret = [], False
     for attr in ("name", "runAs", "logonType", "appName", "args", "startIn"):
-        if props.get(attr):
-            out.append((attr, props.get(attr)))
+        value = props.get(attr)
+        if not value:
+            continue
+        if attr in ("appName", "args"):  # Befehl einer Aufgabe im alten Format (Task, ImmediateTask)
+            value, found = scrub_command(value, props.get("appName", "") if attr == "args" else "")
+            secret |= found
+        out.append((attr, value))
     for exec_ in props.iter():
         if _local(exec_.tag) == "Exec":
             cmd = next((c.text for c in exec_ if _local(c.tag) == "Command"), "") or ""
             args = next((c.text for c in exec_ if _local(c.tag) == "Arguments"), "") or ""
-            out.append(("Befehl", f"{cmd} {args}".strip()))
+            line, found = scrub_command(f"{cmd} {args}".strip())
+            secret |= found
+            out.append(("Befehl", line))
         elif _local(exec_.tag) == "UserId" and exec_.text and not props.get("runAs"):
             out.append(("runAs", exec_.text))
-    return out
+    return out, secret
 
 
 def parse_preferences(data: bytes) -> list[PrefItem]:
@@ -392,8 +407,9 @@ def parse_preferences(data: bytes) -> list[PrefItem]:
         kind = _local(elem.tag)
         has_cpassword = any(props.get(a) for a in SECRET_ATTRS) or any(
             el.get(a) for el in elem.iter() for a in SECRET_ATTRS)
+        cmd_secret = False
         if kind in TASK_TAGS:
-            details = _task_summary(props)
+            details, cmd_secret = _task_summary(props)
         else:
             fields = PREF_FIELDS.get(kind)
             attrs = [(k, v) for k, v in props.attrib.items() if k not in SECRET_ATTRS and k != "action"]
@@ -403,16 +419,23 @@ def parse_preferences(data: bytes) -> list[PrefItem]:
             else:
                 attrs = [a for a in attrs if a[1] not in ("", None)][:8]
             owner = props.get(VALUE_NAME_ATTR.get(kind, ""), "")
-            details = [(k, str(mask_value(owner if k == "value" and owner else k, v))) for k, v in attrs]
+            details = []
+            for k, v in attrs:
+                if k == "arguments":  # Verknüpfung: Aufrufparameter wie bei Skripten bereinigen
+                    v, found = scrub_command(v, props.get("targetPath", ""))
+                    cmd_secret |= found
+                details.append((k, str(mask_value(owner if k == "value" and owner else k, v))))
         members = []
         for m in props.iter():
             if _local(m.tag) == "Member":
                 members.append(("Hinzufügen" if (m.get("action") or "").upper() == "ADD" else "Entfernen",
                                 m.get("name") or "", m.get("sid") or ""))
+        filter_users = [f.get("name") for f in elem.iter() if _local(f.tag) == "FilterUser" and f.get("name")]
         items.append(PrefItem(kind=kind, name=elem.get("name") or props.get("name") or "",
                               action=ACTIONS.get((props.get("action") or "").upper(), props.get("action") or ""),
                               details=details, disabled=all_disabled or elem.get("disabled") == "1",
-                              has_cpassword=has_cpassword, filters=_filters(elem), members=members))
+                              has_cpassword=has_cpassword, filters=_filters(elem), members=members,
+                              has_cmd_secret=cmd_secret, filter_users=filter_users))
     return items
 
 

@@ -144,6 +144,21 @@ def _sync_proposal(ctx: Context, mism: list[dict]) -> None:
          "target": {"name": "DNS-Namen"}}, summary=summary, source="addns", dedup_key=dedup)
 
 
+def netbox_page(ctx: Context, data: AdData) -> int | None:
+    """Bericht der Abweichungen zu Netbox plus Vorschlag für die DNS-Namen."""
+    mism = netbox_mismatches(ctx, data)
+    _sync_proposal(ctx, [m for m in mism if m["netbox_id"]])
+    report = [[m["fqdn"], m["ip"], m["current"] or "–", m["state"]] for m in mism]
+    return propose_page(ctx, PageDraft(
+        doc_type="addns_index", title="DNS-Abgleich mit Netbox",
+        description="Abweichungen zwischen AD-DNS und Netbox",
+        blocks=[Block("dns-netbox", "Abweichungen", markdown.table(
+            ["DNS-Name", "IP", "DNS-Name in Netbox", "Status"], report) if report else "_Keine Abweichungen._")],
+        target_path=(ctx.cfg.wiki.paths.get("addns_index") or "netzwerk/dns") + "/netbox-abgleich",
+        intro="A- und AAAA-Einträge aus dem AD-DNS im Vergleich zu den IP-Adressen in Netbox.",
+        source="addns", stable_id="addns:netbox"))
+
+
 def document_dns(ctx: Context, data: AdData) -> list[int | None]:
     if not data.dns_zones:
         ctx.log.info("Keine AD-integrierten DNS-Zonen gefunden – DNS übersprungen")
@@ -153,18 +168,32 @@ def document_dns(ctx: Context, data: AdData) -> list[int | None]:
         results.append(zone_page(ctx, data, zone))
     if ctx.cfg.ad.dns_netbox_sync and ctx.cfg.netbox.enabled:
         try:
-            mism = netbox_mismatches(ctx, data)
-            _sync_proposal(ctx, [m for m in mism if m["netbox_id"]])
-            report = [[m["fqdn"], m["ip"], m["current"] or "–", m["state"]] for m in mism]
-            results.append(propose_page(ctx, PageDraft(
-                doc_type="addns_index", title="DNS-Abgleich mit Netbox",
-                description="Abweichungen zwischen AD-DNS und Netbox",
-                blocks=[Block("dns-netbox", "Abweichungen", markdown.table(
-                    ["DNS-Name", "IP", "DNS-Name in Netbox", "Status"], report) if report
-                    else "_Keine Abweichungen._")],
-                target_path=(ctx.cfg.wiki.paths.get("addns_index") or "netzwerk/dns") + "/netbox-abgleich",
-                intro="A- und AAAA-Einträge aus dem AD-DNS im Vergleich zu den IP-Adressen in Netbox.",
-                source="addns", stable_id="addns:netbox")))
+            results.append(netbox_page(ctx, data))
         except Exception as exc:  # Netbox-Abgleich darf die DNS-Doku nicht scheitern lassen
             ctx.log.warning("DNS-Abgleich mit Netbox nicht möglich: %s", exc)
     return results
+
+
+class ZoneGone(LookupError):
+    pass
+
+
+def refresh(ctx: Context, stable_id: str) -> int | None:
+    """Genau eine DNS-Seite neu berechnen (Wiki-Lint): eine Zone lädt nur ihre eigenen Einträge.
+    ZoneGone, wenn es die Quelle der Seite nicht mehr gibt."""
+    from doku_agent.generators.ad_common import fetch
+    if stable_id.startswith("addns:zone:"):
+        name = stable_id.split(":", 2)[2]
+        zone = next((z for z in ctx.ad.dns_zones() if z.str("name").lower() == name.lower()), None)
+        if zone is None:
+            raise ZoneGone(f"DNS-Zone {name} gibt es im Active Directory nicht mehr")
+        base = (zone.raw("_base") or b"").decode() or ctx.ad.base
+        data = AdData()
+        data.dns_records = {zone.str("name"): ctx.ad.dns_records(f"DC={zone.str('name')},{base}")}
+        return zone_page(ctx, data, zone)
+    if stable_id == "addns:netbox" and not (ctx.cfg.ad.dns_netbox_sync and ctx.cfg.netbox.enabled):
+        raise ZoneGone("Netbox-Abgleich für DNS ist abgeschaltet")
+    data, errors = fetch(ctx, {"base", "dns"})
+    if errors:
+        raise RuntimeError("; ".join(errors.values()))
+    return netbox_page(ctx, data) if stable_id == "addns:netbox" else index_page(ctx, data)

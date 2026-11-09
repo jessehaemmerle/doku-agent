@@ -289,6 +289,16 @@ class NetboxIndex:
                         "virtualization/virtual-machines", assigned["virtual_machine"]["id"])
                 else:
                     self.orphan_macs.add(norm_mac(mac.get("mac_address")))
+        else:  # Netbox < 4.2: die MAC steht am Interface (ohne Zuordnung kann es dort keine geben)
+            for endpoint, parent, target in (("dcim/interfaces", "device", "dcim/devices"),
+                                              ("virtualization/interfaces", "virtual_machine",
+                                               "virtualization/virtual-machines")):
+                for iface in nb.list(endpoint):
+                    owner = iface.get(parent)
+                    owner = owner.get("id") if isinstance(owner, dict) else owner
+                    mac = norm_mac(iface.get("mac_address"))
+                    if mac and owner:
+                        self.macs[mac] = (target, owner)
 
     def find(self, asset: Asset) -> tuple[str, int, str] | None:
         """(Endpunkt, ID, Trefferart) – Trefferart: wazuh_id, intune_id, serial, name oder mac."""
@@ -434,7 +444,11 @@ def build_plan(asset: Asset, nb: NetboxClient, cfg: NetboxConfig, site_id: int,
             continue
         for cidr in iface.ips:
             host = cidr.split("/")[0]
-            existing = nb.find_one("ipam/ip-addresses", address=host)
+            matches = nb.list("ipam/ip-addresses", address=host)
+            if len(matches) > 1:  # find_one hielte sie für nicht vorhanden und legte ein weiteres Duplikat an
+                hints.append(f"IP {cidr} gibt es in Netbox mehrfach (z.B. in mehreren VRFs) – übersprungen.")
+                continue
+            existing = matches[0] if matches else None
             ref = f"ip{ip_counter}"
             ip_counter += 1
             assignment = {"assigned_object_type": obj_type, "assigned_object_id": f"$if{n}"}
@@ -545,18 +559,35 @@ def run_discovery(ctx: Context) -> dict:
         ctx.store.close_pending(netbox_fields.SETUP_KEY, "Custom Fields sind inzwischen vorhanden.")
     stats = {"gefunden": len(assets), "bekannt": 0, "vorgeschlagen": 0, "anzupassen": 0, "ignoriert": 0,
              "zuletzt_gesehen": 0}
+    synced: dict[tuple[str, int], str] = {}  # Netbox-Objekt -> Name der Quelle, mit der es abgeglichen wurde
     for asset in assets:
         if not asset.name:
             continue
         found = index.find(asset)
+        if found and found[:2] in synced:
+            # Zweite, nicht zusammengeführte Quelle zur selben Netbox-Maschine (z.B. Intune mit altem Gerätenamen):
+            # ein zweiter Abgleich würde den Vorschlag des ersten überschreiben oder schließen
+            ctx.log.warning("%s zeigt auf dieselbe Netbox-Maschine wie %s (%s) – nur einmal abgeglichen; bitte "
+                            "Namen/Seriennummern der Quellen prüfen", asset.name, synced[found[:2]],
+                            ", ".join(sorted(asset.sources)))
+            stats["bekannt"] += 1
+            continue
+        if found:
+            synced[found[:2]] = asset.name
         wants_mac = found is None or bool({"missing", "network"} & set(cfg.netbox.sync))
         if wants_mac and cfg.intune.enabled and cfg.intune.fetch_ethernet_mac and "intune" in asset.sources:
             mac = _ethernet_mac(ctx, asset.sources["intune"]["id"])
             if mac and mac not in asset.macs:
-                asset.interfaces.append(Iface(name="Ethernet", mac=mac, identifies=False))
-        if found is None and asset.macs & index.orphan_macs:
+                # Windows meldet die Onboard-Karte oft schon als "Ethernet": zwei gleichnamige Interfaces ließen den
+                # Plan scheitern (Netbox lehnt das zweite ab, doppelte Änderungsschlüssel)
+                taken = {i.name.lower() for i in asset.interfaces}
+                asset.interfaces.append(Iface(name="Ethernet (Intune)" if "ethernet" in taken else "Ethernet",
+                                              mac=mac, identifies=False))
+        # nur identifizierende MACs: die Intune-Ethernet-MAC ist oft die eines geteilten Docks
+        orphans = asset.identifying_macs & index.orphan_macs
+        if found is None and orphans:
             ctx.log.info("%s: MAC %s existiert in Netbox ohne Zuordnung – keine Neuanlage", asset.name,
-                         ", ".join(sorted(asset.macs & index.orphan_macs)))
+                         ", ".join(sorted(orphans)))
             stats["bekannt"] += 1
             continue
         if found:

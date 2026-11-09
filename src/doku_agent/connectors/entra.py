@@ -55,21 +55,26 @@ class EntraClient(GraphClient):
         self._users: dict[str, tuple[float, dict]] = {}
         self._ca_beta_until = 0.0
         self.notes: list[str] = []  # Hinweise für das Job-Protokoll (z.B. Ausweichen auf beta)
-        self._apps: dict[str, dict | None] = {}
-        self._members: dict[str, set[str] | None] = {}
+        self._apps: dict[str, tuple[float, dict | None]] = {}
+        self._members: dict[str, tuple[float, set[str] | None]] = {}
 
     def missing_permissions(self, areas) -> dict[str, list[str]]:
         probes = {a: PROBES[a] for a in areas if a in PROBES}
-        if "conditional_access" in probes and self.ca_via_beta:
-            path, params = probes["conditional_access"]
-            probes["conditional_access"] = (path.replace("/v1.0/", "/beta/", 1), params)
-        try:
-            return self._missing(probes)
-        except GraphError as exc:
-            if "conditional_access" not in probes or not _server_error(exc) or self.ca_via_beta:
-                raise
-            self._use_beta(exc)
-            return self.missing_permissions(areas)
+        ca = probes.pop("conditional_access", None)
+        missing = self._missing(probes)  # Störungen anderer Bereiche nicht Conditional Access anlasten
+        if ca is not None:
+            path, params = ca
+            beta = (path.replace("/v1.0/", "/beta/", 1), params)
+            try:
+                found = self._missing({"conditional_access": beta if self.ca_via_beta else ca})
+            except GraphError as exc:
+                if not _server_error(exc) or self.ca_via_beta:
+                    raise
+                self._use_beta(exc)
+                found = self._missing({"conditional_access": beta})
+            for permission, names in found.items():
+                missing.setdefault(permission, []).extend(names)
+        return missing
 
     # --- Conditional Access ---------------------------------------------------
     # Antwortet Graph v1.0 bei Conditional Access dauerhaft mit 5xx, wird für eine Stunde über beta gelesen. Eine
@@ -178,23 +183,33 @@ class EntraClient(GraphClient):
     def service_principal(self, app_id: str) -> dict | None:
         if not GUID.match(app_id or ""):
             return None
-        if app_id not in self._apps:
+        cached = self._apps.get(app_id)
+        if cached is None or time.monotonic() - cached[0] > CACHE_SECONDS:  # Client lebt über Jobs hinweg
             try:
                 found = self._get("/v1.0/servicePrincipals", {"$filter": f"appId eq '{app_id}'",
                                                               "$select": "id,appId,displayName"}).get("value") or []
-            except GraphError:
+            except GraphError as exc:
+                if not unavailable(exc):  # vorübergehende Störung nicht zwischenspeichern
+                    return None
                 found = []
-            self._apps[app_id] = found[0] if found else None
-        return self._apps[app_id]
+            cached = (time.monotonic(), found[0] if found else None)
+            self._apps[app_id] = cached
+        return cached[1]
 
     def member_ids(self, group_id: str) -> set[str] | None:
         """IDs aller (auch verschachtelten) Benutzer einer Gruppe – für die Notfallkonten-Prüfung;
-        None, wenn die Mitglieder nicht lesbar sind."""
-        if group_id not in self._members:
+        None, wenn die Mitglieder nicht lesbar sind. Mit Ablaufzeit: ein aus der Gruppe entferntes Notfallkonto
+        darf in der nächsten nächtlichen Prüfung nicht mehr als ausgenommen gelten."""
+        cached = self._members.get(group_id)
+        if cached is None or time.monotonic() - cached[0] > CACHE_SECONDS:
             try:
                 items = self._all(f"/v1.0/groups/{group_id}/transitiveMembers/microsoft.graph.user",
                                   {"$select": "id"})
-                self._members[group_id] = {i.get("id") for i in items}
-            except GraphError:
-                self._members[group_id] = None
-        return self._members[group_id]
+                members = {i.get("id") for i in items}
+            except GraphError as exc:
+                if not unavailable(exc):
+                    return None
+                members = None
+            cached = (time.monotonic(), members)
+            self._members[group_id] = cached
+        return cached[1]

@@ -6,10 +6,10 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, field_validator
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -38,7 +38,14 @@ def _expand_env(value):
 
 
 # TLS-Prüfung: true/false oder Pfad zu einem CA-Bundle (interne CA).
-TlsVerify = bool | str
+def _tls_verify(value):
+    """'true'/'false' aus ${ENV}-Platzhaltern (immer Text) als Wahrheitswert, nicht als Pfad zu einer CA-Datei."""
+    if isinstance(value, str) and value.strip().lower() in ("true", "yes", "on", "1", "false", "no", "off", "0"):
+        return value.strip().lower() in ("true", "yes", "on", "1")
+    return value
+
+
+TlsVerify = Annotated[bool | str, BeforeValidator(_tls_verify)]
 
 
 class GeneralConfig(BaseModel):
@@ -473,7 +480,10 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     if not path.exists():
         raise ConfigError(f"Konfigurationsdatei {path} nicht gefunden (siehe config.example.yaml)")
     content = path.read_bytes()
-    raw = yaml.safe_load(content.decode("utf-8")) or {}
+    try:
+        raw = yaml.safe_load(content.decode("utf-8")) or {}
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:  # z.B. Tab-Einrückung: verständlich melden statt Traceback
+        raise ConfigError(f"{path} ist kein gültiges YAML (UTF-8):\n{exc}") from exc
     try:
         cfg = Config.model_validate(_expand_env(raw))
         cfg._source = (path, hashlib.sha256(content).hexdigest())

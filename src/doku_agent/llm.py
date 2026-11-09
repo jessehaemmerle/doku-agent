@@ -97,7 +97,7 @@ class LLM:
             return text
         return text[:limit] + "\n[... gekürzt ...]"
 
-    def condense(self, text: str, purpose: str) -> str:
+    def condense(self, text: str, purpose: str, _depth: int = 0) -> str:
         """Lange Eingaben abschnittsweise zusammenfassen (Map-Reduce), bis sie ins Budget passen."""
         limit = self.cfg.max_input_chars
         if len(text) <= limit:
@@ -113,6 +113,11 @@ class LLM:
                 f"IPs, Pfade, Einstellungen, Abläufe) als kompakte Stichpunkte:\n\n{part}",
             ))
         merged = "\n".join(summaries)
+        if len(merged) > limit and len(merged) < len(text) and _depth < 2:
+            # die Zusammenfassungen selbst noch einmal verdichten, statt hinten abzuschneiden
+            return self.condense(merged, purpose, _depth + 1)
+        if len(merged) > limit:
+            log.warning("Zusammenfassung passt nicht ins Budget (%s > %s Zeichen) – wird gekürzt", len(merged), limit)
         return self.fit(merged)
 
     def models(self) -> list[str]:

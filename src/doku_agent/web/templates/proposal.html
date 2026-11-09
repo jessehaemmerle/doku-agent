@@ -90,7 +90,7 @@
         <label class="check"><input type="checkbox" name="ignore" value="1"> Nicht mehr vorschlagen</label>
         <div class="actions"><button class="danger" type="submit">Ablehnen</button></div>
       </form>
-    {% elif p.status in ('failed', 'rejected') %}
+    {% elif p.status in ('failed', 'rejected', 'applying') %}
       <form method="post" action="/vorschlaege/{{ p.id }}/wieder-oeffnen">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <div class="actions"><button type="submit">Wieder öffnen</button></div>

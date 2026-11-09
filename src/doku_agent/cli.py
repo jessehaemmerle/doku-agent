@@ -114,9 +114,13 @@ def _approve(args) -> int:
 
 
 def cmd_reject(args) -> int:
-    from doku_agent.apply import reject_proposal
+    from doku_agent.apply import ApplyError, reject_proposal
 
-    reject_proposal(_ctx(args), args.id, ignore=args.ignore)
+    try:
+        reject_proposal(_ctx(args), args.id, ignore=args.ignore)
+    except ApplyError as exc:
+        print(f"Nicht abgelehnt: {exc}", file=sys.stderr)
+        return 1
     print("Abgelehnt.")
     return 0
 

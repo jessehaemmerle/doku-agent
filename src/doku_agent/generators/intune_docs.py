@@ -8,7 +8,7 @@ from doku_agent import markdown
 from doku_agent.connectors.intune import IntuneError
 from doku_agent.context import Context
 from doku_agent.generators import narrative
-from doku_agent.generators.common import mask_value
+from doku_agent.generators.common import mask_tree, mask_value
 from doku_agent.pages import Block, PageDraft, propose_page
 
 SKIP_KEYS = {"id", "displayName", "description", "createdDateTime", "lastModifiedDateTime", "version",
@@ -46,8 +46,8 @@ def flatten(obj, prefix: str = "") -> list[tuple[str, str]]:
             return rows
         if all(not isinstance(v, (dict, list)) for v in obj):
             rows.append((prefix.rstrip("."), ", ".join(str(v) for v in obj)))
-        else:
-            rows.append((prefix.rstrip("."), json.dumps(obj, ensure_ascii=False)[:800]))
+        else:  # Geheimnisse in den Objekten maskieren – die Zeile trägt nur den Namen der Liste
+            rows.append((prefix.rstrip("."), json.dumps(mask_tree(obj), ensure_ascii=False)[:800]))
     elif obj not in (None, ""):
         rows.append((prefix.rstrip("."), str(obj)))
     return rows

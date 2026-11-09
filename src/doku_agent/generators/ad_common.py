@@ -382,7 +382,8 @@ class AdNames:
         e = self._accounts[key]
         if e is not None:
             return self.entry(e)
-        return "Konto" if self.mode == "count" and sep else value
+        # nicht auflösbar (z.B. gelöschtes oder lokales Konto): könnte eine Person sein
+        return "Konto" if self.mode == "count" else value
 
     def accounts(self, entries: list[Entry], limit: int = 10) -> str:
         """Kontenliste für Befunde; im Modus count nur die Anzahl."""

@@ -83,15 +83,30 @@ def _token_numbers(low: str) -> list[str]:
     unit = _UNIT.match(low)
     if _NUMBER.match(low) or unit:
         return [_num(unit.group(1) if unit else low)]
-    if _ISO_DATE.match(low) or re.fullmatch(r"v?\d+(?:\.\d+){2,}", low):  # Datum, Version 10.0.19045
+    if _ISO_DATE.match(low):  # nur das Datum: Stunde/Minute/Sekunde ließen sonst jede Zahl bis 59 durch
+        return [_num(n) for n in re.findall(r"\d+", low.split("t")[0])]
+    if re.fullmatch(r"v?\d+(?:\.\d+){2,}", low):  # Version 10.0.19045
         return [_num(n) for n in re.findall(r"\d+", low)]
     return [_num(part) for part in re.split(r"[-/:]", low) if _NUMBER.match(part)]
+
+
+def _token_times(low: str) -> set[str]:
+    """Uhrzeiten aus einem ISO-Zeitstempel ('…t04:12:33z' -> 04:12, 4:12, 04:12:33, 4:12:33)."""
+    m = _ISO_DATE.match(low) and re.match(r"(\d{2}):(\d{2})(?::(\d{2}))?", low.split("t", 1)[1] if "t" in low else "")
+    if not m:
+        return set()
+    hour, minute, second = m.group(1), m.group(2), m.group(3)
+    out = {f"{hour}:{minute}", f"{int(hour)}:{minute}"}
+    if second:
+        out |= {f"{hour}:{minute}:{second}", f"{int(hour)}:{minute}:{second}"}
+    return out
 
 
 def unverified(text: str, facts: str) -> list[str]:
     """Konkrete Angaben im Text, die in den Fakten nicht vorkommen (Reihenfolge wie im Text, ohne Doppelte)."""
     hay = facts.lower()
     numbers = {n for raw in hay.split() for n in _token_numbers(raw.strip(_TRIM))}
+    times = {t for raw in hay.split() for t in _token_times(raw.strip(_TRIM))}
     bad: list[str] = []
 
     def miss(claim: str) -> None:
@@ -120,7 +135,7 @@ def unverified(text: str, facts: str) -> list[str]:
                 miss(token)
         elif any(c.isdigit() for c in low):
             # zusammengesetzt (srv01, ubuntu-24.04, 04:00, v7.4.5): als Ganzes oder Teil für Teil belegt
-            if _present(low, hay):
+            if _present(low, hay) or low in times:
                 continue
             if _NAME_NUMBER.match(low):  # webfarm-01, vlan-20: Name mit Nummer nur als Ganzes
                 miss(token)

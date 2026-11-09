@@ -353,6 +353,16 @@ class _Builder:
             port = self.info.ports.get(ifindex)
             if port is None:
                 continue
+            local = self.nb_ports.get(port.name)
+            ltype = (local or {}).get("type")
+            ltype = ltype.get("value") if isinstance(ltype, dict) else ltype
+            if iface_type(port.speed, port.iftype) in NOT_CABLEABLE or ltype in NOT_CABLEABLE:
+                # Port-Channel: die MAC-Tabelle ordnet gelernte MACs dem LAG zu. Netbox lehnt Kabel daran ab, und der
+                # Fehler würde den ganzen Vorschlag zurückrollen – Kabel gehören an die Mitgliedsports.
+                if remote is not None:
+                    self.hints.append(f"{port.name}: LAG bzw. virtuelles Interface – Kabel an den Mitgliedsports "
+                                      "eintragen (kein Vorschlag).")
+                continue
             if remote is None:
                 if how:
                     self.hints.append(f"{port.name}: {how} – kein Kabel vorgeschlagen.")
@@ -365,7 +375,6 @@ class _Builder:
                 self.hints.append(f"{port.name}: Gegenstelle {remote_dev.get('name')} {remote.get('name')} ist "
                                   "ein virtuelles Interface – kein Kabel möglich.")
                 continue
-            local = self.nb_ports.get(port.name)
             peer_text = f"{remote_dev.get('name')} {remote.get('name')}"
             if local and local.get("cable"):
                 peers = {p.get("id") for p in local.get("link_peers") or []}

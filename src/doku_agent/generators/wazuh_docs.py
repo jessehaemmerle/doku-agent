@@ -8,6 +8,8 @@ from doku_agent import markdown
 from doku_agent.context import Context
 from doku_agent.generators import narrative
 from doku_agent.generators.common import STYLE_RULES, cached, digest, mask_xml, parse_xml_fragment
+from doku_agent.generators.narrative import unverified
+from doku_agent.llm import LLMError
 from doku_agent.pages import Block, PageDraft, propose_page
 
 RULE_BATCH = 6  # Regeln pro LLM-Aufruf (Kontextbudget eines 8B-Modells auf CPU)
@@ -77,6 +79,14 @@ def parse_decoders(xml_text: str) -> list[dict]:
     return out
 
 
+def _llm_down(ctx: Context, exc: LLMError) -> None:
+    """Ausfall des Sprachmodells einmal je Lauf melden; danach nur noch Zwischengespeichertes verwenden."""
+    if not ctx.__dict__.get("_llm_down"):
+        ctx.log.warning("Sprachmodell nicht erreichbar (%s) – neue Erläuterungen fehlen, die Seiten werden trotzdem "
+                        "erstellt", exc)
+    ctx.__dict__["_llm_down"] = True
+
+
 def _explain_rules(ctx: Context, filename: str, rules: list[dict]) -> tuple[str, dict[str, str]]:
     explanations: dict[str, str] = {}
     summaries = []
@@ -85,7 +95,9 @@ def _explain_rules(ctx: Context, filename: str, rules: list[dict]) -> tuple[str,
         xml_block = "\n\n".join(r["xml"] for r in batch)
 
         def ask():
-            return ctx.llm.json(
+            if ctx.__dict__.get("_llm_down"):  # in diesem Lauf schon gescheitert: nur Zwischengespeichertes
+                raise LLMError("Sprachmodell in diesem Lauf nicht erreichbar")
+            result = ctx.llm.json(
                 "Du bist Wazuh-Experte und dokumentierst eigene Wazuh-Regeln. " + STYLE_RULES,
                 f"Datei: {filename}\n\nErkläre für jede Regel in 2-4 Sätzen: wann sie auslöst, worauf sie "
                 f"aufbaut (if_sid/if_group), was das Level bedeutet und welche Reaktion sinnvoll ist. "
@@ -93,8 +105,18 @@ def _explain_rules(ctx: Context, filename: str, rules: list[dict]) -> tuple[str,
                 f"{ctx.llm.fit(xml_block)}",
                 EXPLAIN_SCHEMA,
             )
+            # Faktenprüfung wie bei narrate: eine Erklärung mit nicht belegten Angaben (erfundene if_sid, Level …)
+            # erscheint nicht; die Regel bekommt dann "_Keine Erläuterung erzeugt._"
+            result["regeln"] = [r for r in result.get("regeln", []) if not unverified(r.get("erklaerung", ""), xml_block)]
+            if unverified(result.get("zusammenfassung", ""), xml_block):
+                result["zusammenfassung"] = ""
+            return result
 
-        result = cached(ctx, "wazuh-rules:" + digest(filename, xml_block), ask)
+        try:
+            result = cached(ctx, "wazuh-rules:" + digest(filename, xml_block), ask)
+        except LLMError as exc:  # Modell nicht erreichbar: Seite trotzdem, ohne neue Erklärungen
+            _llm_down(ctx, exc)
+            result = {}
         summaries.append(result.get("zusammenfassung", "").strip())
         for item in result.get("regeln", []):
             explanations[str(item.get("id"))] = item.get("erklaerung", "").strip()
@@ -156,11 +178,19 @@ def document_decoder_file(ctx: Context, file_info: dict) -> int | None:
         ctx.log.warning("%s: XML-Fehler %s", filename, exc)
     summary = ""
     if decoders:
-        summary = cached(ctx, "wazuh-decoders:" + digest(filename, raw), lambda: ctx.llm.text(
-            "Du bist Wazuh-Experte. " + STYLE_RULES,
-            "Beschreibe in 3-6 Sätzen, welche Logquellen diese Wazuh-Decoder verarbeiten, welche Felder sie "
-            f"extrahieren und wie die Decoder aufeinander aufbauen.\n\n{ctx.llm.fit(raw)}",
-        ))
+        def ask() -> str:
+            if ctx.__dict__.get("_llm_down"):
+                raise LLMError("Sprachmodell in diesem Lauf nicht erreichbar")
+            text = ctx.llm.text(
+                "Du bist Wazuh-Experte. " + STYLE_RULES,
+                "Beschreibe in 3-6 Sätzen, welche Logquellen diese Wazuh-Decoder verarbeiten, welche Felder sie "
+                f"extrahieren und wie die Decoder aufeinander aufbauen.\n\n{ctx.llm.fit(raw)}")
+            return "" if unverified(text, raw) else text  # nicht belegte Angaben: lieber keine Zusammenfassung
+
+        try:
+            summary = cached(ctx, "wazuh-decoders:" + digest(filename, raw), ask)
+        except LLMError as exc:
+            _llm_down(ctx, exc)
     table = markdown.table(
         ["Name", "Parent", "program_name", "prematch", "regex", "order"],
         [[d["name"], d["parent"], d["program_name"], d["prematch"], d["regex"], d["order"]] for d in decoders],
