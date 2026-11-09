@@ -5,7 +5,7 @@
 <p class="lede">Verbindungstest zu allen Diensten. Ausgehende Verbindungen sind nur zu den unten aufgeführten Hosts erlaubt – alles andere blockiert der Agent, bevor ein Byte gesendet wird.</p>
 <table class="kv">
   {% for name, ok, detail in checks %}
-  <tr><th>{{ name }}</th><td><span class="{{ 'ok' if ok else 'bad' }}">{{ 'erreichbar' if ok else 'Fehler' }}</span> – {{ detail }}</td></tr>
+  <tr><th scope="row">{{ name }}</th><td><span class="{{ 'ok' if ok else 'bad' }}">{{ 'erreichbar' if ok else 'Fehler' }}</span> – {{ detail }}</td></tr>
   {% endfor %}
 </table>
 
@@ -21,7 +21,7 @@
     <span class="title"><code>{{ i.key }}</code><span class="sub">{{ i.reason }}, {{ i.created_at[:10] }}</span></span>
     <form method="post" action="/ignorierliste/entfernen">
       <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="key" value="{{ i.key }}">
-      <button type="submit">Wieder vorschlagen</button>
+      <button type="submit" aria-label="Wieder vorschlagen: {{ i.key }}">Wieder vorschlagen</button>
     </form>
   </div>
   {% endfor %}

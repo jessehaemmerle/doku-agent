@@ -16,8 +16,10 @@
       {% set chosen = p.payload.selected or [] %}
       <div class="sheet">
         <h2>Abweichungen bei {{ p.payload.target.name }}</h2>
-        <p class="muted">Gefunden über {{ {'serial': 'Seriennummer', 'name': 'Hostname', 'mac': 'MAC-Adresse'}[p.payload.target.matched_by] }}.
-          {% if p.status == 'pending' %}Abgewählte Änderungen werden beim nächsten Lauf erneut vorgeschlagen.{% endif %}</p>
+        {% set how = p.payload.target.matched_by %}
+        {% if how or p.status == 'pending' %}<p class="muted">
+          {% if how %}Gefunden über {{ {'serial': 'Seriennummer', 'name': 'Hostname', 'mac': 'MAC-Adresse'}.get(how, how) }}.{% endif %}
+          {% if p.status == 'pending' %}Abgewählte Änderungen werden beim nächsten Lauf erneut vorgeschlagen.{% endif %}</p>{% endif %}
         <div class="table-scroll"><table class="changes">
           <thead><tr><th scope="col">Übernehmen</th><th scope="col">Änderung</th><th scope="col">Vorher</th><th scope="col">Nachher</th></tr></thead>
           <tbody>

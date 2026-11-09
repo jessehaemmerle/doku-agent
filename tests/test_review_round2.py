@@ -425,3 +425,31 @@ def test_upload_cleans_up_and_keeps_same_named_files(ctx, monkeypatch):
                 files=[("files", ("config.txt", b"eins")), ("files", ("config.txt", b"zwei"))])
     files = ctx.store.list_jobs()[0].params["files"]
     assert len(set(files)) == 2 and sorted(open(f, "rb").read() for f in files) == [b"eins", b"zwei"]
+
+
+# --- Weboberfläche: Barrierefreiheit und Vorschlagsseite ---------------------------------------------------------
+
+def _proposal_html(ctx, target):
+    from fastapi.testclient import TestClient
+    from doku_agent.web.app import create_app
+    from tests.test_web import AUTH
+    pid = ctx.store.add_proposal(
+        "netbox_plan", "Netbox: Test", {"changes": [{"key": "dns:7", "category": "network", "label": "DNS-Name von 10.0.0.5",
+                                                     "before": "–", "after": "web.corp.example.test", "steps": [],
+                                                     "requires": []}], "hints": [], "target": target},
+        summary="s", source="addns", dedup_key=f"t-{target.get('matched_by')}")
+    return TestClient(create_app(ctx), base_url="http://localhost").get(f"/vorschlaege/{pid}", auth=AUTH).text
+
+
+def test_proposal_without_match_reason_has_no_empty_sentence(ctx):
+    # DNS-, FortiGate- und Switch-Vorschläge haben kein matched_by: kein "Gefunden über ." mehr
+    html = _proposal_html(ctx, {"name": "DNS-Namen"})
+    assert "Gefunden über" not in html and "Abgewählte Änderungen" in html
+    assert "Gefunden über Seriennummer." in _proposal_html(ctx, {"name": "srv1", "matched_by": "serial"})
+
+
+def test_base_layout_has_skip_link_and_readable_counter(ctx):
+    html = _proposal_html(ctx, {"name": "x"})  # ein offener Vorschlag -> Zähler in der Navigation
+    assert '<a class="skip" href="#inhalt">' in html and '<main id="inhalt">' in html
+    assert html.index('class="skip"') < html.index("<nav")  # erstes fokussierbares Element
+    assert '<span class="sr-only"> offen</span>' in html and 'aria-label="1 offen"' not in html

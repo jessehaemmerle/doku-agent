@@ -8,13 +8,14 @@
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 <body>
+  <a class="skip" href="#inhalt">Zum Inhalt springen</a>
   <nav class="nav" aria-label="Hauptnavigation">
     <p class="brand">doku-agent <span>lokal</span></p>
     {% set here = request.url.path %}
     <ul>
       <li><a href="/" {% if here == '/' %}aria-current="page"{% endif %}>Übersicht</a></li>
       <li><a href="/vorschlaege" {% if here.startswith('/vorschlaege') %}aria-current="page"{% endif %}>Freigaben
-        {% if pending %}<span class="count" aria-label="{{ pending }} offen">{{ pending }}</span>{% endif %}</a></li>
+        {% if pending %}<span class="count">{{ pending }}<span class="sr-only"> offen</span></span>{% endif %}</a></li>
       <li><a href="/auftrag" {% if here == '/auftrag' %}aria-current="page"{% endif %}>Neuer Auftrag</a></li>
       <li><a href="/fragen" {% if here.startswith('/fragen') %}aria-current="page"{% endif %}>Fragen</a></li>
       <li><a href="/wiki-lint" {% if here == '/wiki-lint' %}aria-current="page"{% endif %}>Wiki-Lint</a></li>
@@ -23,7 +24,7 @@
       <li><a href="/status" {% if here == '/status' %}aria-current="page"{% endif %}>Status</a></li>
     </ul>
   </nav>
-  <main>
+  <main id="inhalt">
     {% if msg %}<p class="flash" role="status">{{ msg }}</p>{% endif %}
     {% if err %}<p class="flash err" role="alert">{{ err }}</p>{% endif %}
     {% block content %}{% endblock %}
