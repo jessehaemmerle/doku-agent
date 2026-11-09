@@ -129,7 +129,10 @@ certificateTemplates: SafeTemplate
 nTSecurityDescriptor: O:DAG:DAD:(A;;LCRPLORC;;;AU)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)
 LDIF
 
-# --- DNS: ein dynamischer A-Eintrag (zeigt sich im DNS-Bericht und im Netbox-Abgleich) ---
-samba-tool dns add dc1.corp.example.test corp.example.test app01 A 10.1.0.50 $A 2>/dev/null || true
+# --- DNS: ein A-Eintrag (zeigt sich im DNS-Bericht und im Netbox-Abgleich) ---
+# "samba-tool dns" kennt kein -H; nur anlegen, wenn er fehlt (Skript ist wiederholbar), Fehler nicht verschlucken
+DNSAUTH="-U Administrator%Adm1n!Passw0rd"
+samba-tool dns query dc1.corp.example.test corp.example.test app01 A $DNSAUTH > /dev/null 2>&1 \
+  || q samba-tool dns add dc1.corp.example.test corp.example.test app01 A 10.1.0.50 $DNSAUTH
 
 echo "Testdaten angelegt: Clients - Sicherheit $CLI, Server - Basis $SRV, AD CS (VulnUserAuth), DNS (app01)"

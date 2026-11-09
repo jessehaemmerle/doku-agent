@@ -55,6 +55,8 @@ services:
     volumes:
       - ollama-models:/root/.ollama
     networks: [llm]
+    cap_drop: [ALL]                 # braucht keine Capabilities (Port > 1024, Dateien im eigenen Volume)
+    security_opt: ["no-new-privileges:true"]
     # 16 GB Host: qwen3:8b (Q4) braucht ca. 6-7 GB inkl. 8k-Kontext, qwen3-embedding:0.6b ca. 1 GB.
     mem_limit: 11g
     healthcheck:
@@ -77,6 +79,8 @@ services:
     volumes:
       - ollama-models:/root/.ollama
     networks: [lan]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     mem_limit: 11g
 
 networks:
