@@ -17,7 +17,7 @@ from doku_agent.ad_acl import (APPLY_GROUP_POLICY, CONTROL_ACCESS, GENERIC_ALL, 
 from doku_agent.connectors.ad import Entry
 from doku_agent.context import Context
 from doku_agent.generators import narrative
-from doku_agent.generators.ad_common import AdData, AdNames, day, ou_path
+from doku_agent.generators.ad_common import AdData, AdNames, day, dns_name, ou_path
 from doku_agent.generators.common import mask_value
 from doku_agent.pages import Block, PageDraft, propose_page, render_path
 
@@ -243,6 +243,7 @@ class Link:
     enabled: bool
     enforced: bool
     blocked: bool = False  # Ziel blockiert die Vererbung
+    gpo_domain: str = ""  # GPO einer anderen Domäne der Gesamtstruktur (nur über Standorte möglich)
 
 
 def parse_gplink(value: str) -> list[tuple[str, int]]:
@@ -267,21 +268,32 @@ def link_targets(data: AdData) -> list[tuple[Entry, str, str]]:
     return out
 
 
+def foreign_domain(data: AdData, dn: str) -> str:
+    """DNS-Name der Domäne einer verknüpften GPO, wenn es nicht die eigene ist; sonst leer. Standorte gelten
+    gesamtstrukturweit und dürfen GPOs anderer Domänen verknüpfen – die fehlen hier nicht, sie liegen woanders."""
+    domain = dns_name(dn).lower()
+    return domain if domain and domain != dns_name(data.base).lower() else ""
+
+
 def links(data: AdData) -> dict[str, list[Link]]:
-    """GPO-GUID (groß) -> Verknüpfungen; Schlüssel ohne passende GPO sind verwaiste Verknüpfungen."""
+    """GPO-GUID (groß) -> Verknüpfungen; Schlüssel ohne passende GPO (und ohne fremde Domäne) sind verwaist."""
     out: dict[str, list[Link]] = {}
     for obj, label, kind in link_targets(data):
         entries = parse_gplink(obj.str("gPLink"))
         blocked = (obj.int("gPOptions", 0) or 0) & 1 == 1
         for i, (dn, options) in enumerate(entries):
             out.setdefault(gpo_guid(dn) or dn, []).append(Link(
-                obj.dn, label, kind, len(entries) - i, not options & 1, bool(options & 2), blocked))
+                obj.dn, label, kind, len(entries) - i, not options & 1, bool(options & 2), blocked,
+                foreign_domain(data, dn)))
     return out
 
 
-def gpo_name(data: AdData, guid: str) -> str:
+def gpo_name(data: AdData, guid: str, dn: str = "") -> str:
     g = next((x for x in data.gpos if x.str("cn").upper() == guid.upper()), None)
-    return (g.str("displayName") or guid) if g else f"gelöschte GPO {guid}"
+    if g is not None:
+        return g.str("displayName") or guid
+    foreign = foreign_domain(data, dn) if dn else ""
+    return f"GPO {guid} der Domäne {foreign}" if foreign else f"gelöschte GPO {guid}"
 
 
 def link_text(data: AdData, obj: Entry) -> list[str]:
@@ -290,7 +302,8 @@ def link_text(data: AdData, obj: Entry) -> list[str]:
     out = []
     for i, (dn, options) in reversed(list(enumerate(entries))):
         flags = (["erzwungen"] if options & 2 else []) + (["deaktiviert"] if options & 1 else [])
-        out.append(f"{len(entries) - i}. {gpo_name(data, gpo_guid(dn))}" + (f" ({', '.join(flags)})" if flags else ""))
+        out.append(f"{len(entries) - i}. {gpo_name(data, gpo_guid(dn), dn)}"
+                   + (f" ({', '.join(flags)})" if flags else ""))
     return out
 
 
@@ -337,7 +350,12 @@ def computers_can_read(acl: GpoAcl, domain_sid: str) -> bool:
     """Seit MS16-072 liest der Computer die GPO auch für Benutzereinstellungen. Die Domänencontroller der
     Organisation (S-1-5-9) haben in jeder GPO Leserecht und zählen deshalb nicht."""
     readers = set(acl.read)
-    return bool(readers & {"S-1-5-11", "S-1-1-0", f"{domain_sid}-515"})
+    if readers & {"S-1-5-11", "S-1-1-0", f"{domain_sid}-515"}:
+        return True
+    # Abhilfe mit eigener Computergruppe (z.B. "Finance PCs" nur lesen, "Finance Users" übernehmen): weitere Leser,
+    # die die GPO nicht anwenden – im Zweifel kein Befund, statt eine korrekte Einrichtung zu bemängeln
+    extra = readers - set(acl.apply) - {"S-1-5-9", "S-1-5-18", "S-1-3-0"}
+    return any(not is_admin(sid) for sid in extra)
 
 
 def ms16_072(gpo: Entry, acl: GpoAcl, domain_sid: str) -> bool:
@@ -380,12 +398,14 @@ KNOWN = {"gpt.ini", "registry.pol", "gpttmpl.inf", "audit.csv", "scripts.ini", "
 
 def _walk(ctx: Context, path: str, depth: int = 0, limit: list | None = None) -> list[tuple[str, int]]:
     """Alle Dateien unterhalb eines GPO-Ordners (relativ, Originalschreibweise) mit Größe; ohne den alten
-    ADM-Ordner (Vorlagen, keine Einstellungen)."""
-    limit = limit if limit is not None else [0]
+    ADM-Ordner (Vorlagen, keine Einstellungen). limit = [Zähler, abgeschnitten]: nach 2000 Einträgen bzw. unter
+    Ebene 8 wird abgebrochen und das vermerkt."""
+    limit = limit if limit is not None else [0, False]
     out = []
     for e in ctx.sysvol.listdir(path) or []:
         limit[0] += 1
         if limit[0] > 2000 or depth > 8:
+            limit[1] = True
             break
         rel = f"{path}\\{e.name}"
         if e.is_dir:
@@ -407,10 +427,13 @@ def load_files(ctx: Context, data: AdData, guid: str) -> GpoFiles:
     try:
         if ctx.sysvol.listdir(root) is None:
             return GpoFiles(found=False)
-        entries = _walk(ctx, root)
+        walked = [0, False]
+        entries = _walk(ctx, root, limit=walked)
     except SysvolFileError as exc:  # Rechte der GPO in SYSVOL geändert: nur diese GPO betroffen
         return GpoFiles(errors=[f"Ordner nicht lesbar: {exc}"])
     files = GpoFiles()
+    if walked[1]:  # sonst sähe die Seite vollständig aus, obwohl z.B. Preferences (cpassword) fehlen könnten
+        files.errors.append("mehr als 2000 Dateien bzw. tiefer als 8 Ebenen – nicht alle Dateien ausgewertet")
     for path, size in entries:
         rel = path[len(root) + 1:]
         parts = rel.split("\\")
@@ -482,19 +505,25 @@ def admx_catalog(ctx: Context, data: AdData) -> tuple[gpo_files.AdmxCatalog | No
     cached = ctx._clients.get("admx")
     if cached and cached[0] == signature:
         return cached[1], cached[2]
-    admx, adml_files = {}, {}
+    from doku_agent.connectors.sysvol import SysvolFileError
+    admx, adml_files, unreadable = {}, {}, []
     for name in listing:
-        admx[name] = read(name)
         stem = name.rsplit(".", 1)[0] + ".adml"
-        for lang in langs:
-            content = adml(lang, stem)
-            if content:
-                adml_files[stem] = content
-                break
+        try:  # eine gesperrte Datei kostet nur ihre Namen, nicht die Auswertung aller GPOs
+            admx[name] = read(name)
+            for lang in langs:
+                content = adml(lang, stem)
+                if content:
+                    adml_files[stem] = content
+                    break
+        except (SysvolFileError, OSError) as exc:
+            unreadable.append(f"{name}: {exc}")
     catalog = gpo_files.AdmxCatalog().load(admx, adml_files)
     note = f"{len(catalog)} Richtlinien aus {catalog.files} ADMX-Dateien ({source})"
-    if catalog.errors:
-        ctx.log.warning("ADMX-Dateien nicht lesbar: %s", "; ".join(catalog.errors[:5]))
+    if unreadable:
+        note += f"; {len(unreadable)} Datei(en) nicht lesbar"
+    if catalog.errors or unreadable:
+        ctx.log.warning("ADMX-Dateien nicht lesbar: %s", "; ".join((unreadable + catalog.errors)[:5]))
     ctx._clients["admx"] = (signature, catalog, note)
     return catalog, note
 
@@ -731,7 +760,8 @@ def wmi_filter(data: AdData, gpo: Entry) -> tuple[str, Entry | None, bool]:
 def wql(entry: Entry) -> str:
     """Abfragen aus msWMI-Parm2: '1;3;10;66;WQL;root\\CIMv2;SELECT …;' (Länge;Sprache;Namespace;Abfrage …)."""
     raw = entry.str("msWMI-Parm2")
-    queries = re.findall(r"WQL;([^;]*);(.*?);(?=\d+;\d+;WQL;|$)", raw)
+    # je Abfrage drei Längen (Sprache;Namespace;Abfrage) vor 'WQL' – die nächste Abfrage beginnt mit '3;10;45;WQL;'
+    queries = re.findall(r"WQL;([^;]*);(.*?);(?=\d+;\d+;\d+;WQL;|$)", raw)
     return "<br>".join(f"`{q.strip()}` ({ns})" for ns, q in queries) or raw
 
 
@@ -874,7 +904,7 @@ def overview(ctx: Context, data: AdData, names: AdNames) -> tuple[str, list[Bloc
                      wmi_filter(data, g)[0] or "–", day(g.time("whenChanged")) or "–",
                      ", ".join(dict.fromkeys(exts)) or "–"])
     orphan = [[lk.target, guid] for guid, gl in sorted(all_links.items()) for lk in gl
-              if not any(g.str("cn").upper() == guid for g in data.gpos)]
+              if not lk.gpo_domain and not any(g.str("cn").upper() == guid for g in data.gpos)]
     summary = markdown.table(["Gruppenrichtlinien", "Anzahl"], [[k, v] for k, v in counts.items()])
     table = markdown.table(["GPO", "Status", "Verknüpft mit", "WMI-Filter", "Geändert", "Erweiterungen"], rows) \
         if rows else "_Keine Gruppenrichtlinien._"

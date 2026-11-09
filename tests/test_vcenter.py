@@ -212,3 +212,21 @@ def test_check_reads_vcenter(env):
     ctx, nbf, fake = env
     ok, message = {name: (ok, msg) for name, ok, msg in run_checks(ctx)}["vCenter"]
     assert ok is True and message.startswith("1 Cluster, ") and message.endswith(" Hosts")
+
+
+def test_cluster_change_keeps_correct_host(env):
+    """Host schon im Ziel-Cluster und der VM zugeordnet: beim Clusterwechsel nicht entfernen (device=None)."""
+    ctx, nbf, fake = env
+    cluster_a = nbf.add("virtualization/clusters", {"name": "Cluster-Alt"})
+    host = nbf.add("dcim/devices", {"name": "esx01", "cluster": {"id": 77, "name": "Cluster-HQ"}})
+    nbf.add("virtualization/virtual-machines", {
+        "name": "web01", "serial": vmware_serial(BIOS), "vcpus": 4, "memory": 8192, "platform": None,
+        "cluster": {"id": cluster_a["id"], "name": "Cluster-Alt"}, "device": {"id": host["id"], "name": "esx01"},
+        "primary_ip4": None})
+    asset = next(a for a in vcenter_assets(ctx) if a.name == "web01")
+    apply_precedence(asset)
+    index = NetboxIndex(ctx.netbox)
+    assert propose_sync(ctx, asset, index.find(asset), index)
+    placement = {c["key"]: c for c in ctx.store.list_proposals("pending")[0].payload["changes"]}["placement"]
+    assert placement["steps"][-1]["data"] == {"cluster": "$vc_cluster"}
+    assert placement["after"] == "Cluster-HQ / esx01"

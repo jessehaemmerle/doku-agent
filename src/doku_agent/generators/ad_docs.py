@@ -506,7 +506,8 @@ def audit(ctx: Context, data: AdData, names: AdNames) -> dict[str, list[list]]:
     for guid, gl in all_links.items():
         if not any(g.str("cn").upper() == guid for g in data.gpos):
             for lk in gl:
-                f["gpo"].append([lk.target, f"Verknüpfung auf nicht vorhandene GPO {guid}"])
+                if not lk.gpo_domain:  # GPO einer anderen Domäne (Standort-Verknüpfung) ist nicht verwaist
+                    f["gpo"].append([lk.target, f"Verknüpfung auf nicht vorhandene GPO {guid}"])
 
     # Kennwortrichtlinien
     d = data.domain

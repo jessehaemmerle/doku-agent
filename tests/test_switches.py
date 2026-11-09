@@ -333,3 +333,14 @@ def test_seed_with_own_name_is_not_queried_again_via_lldp(crawl, monkeypatch):
     assert asked == ["core.firma.local", "10.0.0.3", "10.0.0.4"]  # sw-core01 wird am sysName wiedererkannt
     names = [ctx.store.get_proposal(r).payload["target"]["name"] for r in results if r]
     assert names.count("core-zentrale") == 1 and "sw-core01" not in names
+
+
+def test_no_cable_on_lag_port(env):
+    """Gelernte MACs eines Port-Channels: kein Kabel am LAG (Netbox lehnt es ab und rollt den Vorschlag zurück)."""
+    ctx, nbf, sw, nodes = env
+    data = switch_data()
+    data.tables["ifType"][(1,)] = 161  # Port 1 ist ein LAG
+    prop = ctx.store.get_proposal(propose_switch(ctx, sw, data=data))
+    keys = {c["key"] for c in prop.payload["changes"]}
+    assert "cable:Gi1/0/1" not in keys and "cable:Gi1/0/2" in keys
+    assert any("LAG" in h for h in prop.payload["hints"])

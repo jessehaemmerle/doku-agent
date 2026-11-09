@@ -209,3 +209,219 @@ def test_name_match_is_remembered_only_after_approval_and_respects_ignore(ctx, f
     ctx.store.update_proposal(pid, status="rejected")
     pid2 = propose_page(ctx, draft)
     assert ctx.store.get_proposal(pid2).payload["path"] != "wartung/backup"
+
+
+# --- Netbox, Discovery, Abdeckung ----------------------------------------------------------------------------
+
+from tests.test_netbox_sync import nbf, sctx  # noqa: E402,F401  (Fixtures)
+
+
+def test_ip_existing_twice_is_not_created_again(sctx, nbf):  # noqa: F811
+    from tests.test_netbox_sync import _asset, _changes, _device
+
+    dev = _device(nbf, serial="ABC123")
+    nbf.add("dcim/interfaces", {"device": dev["id"], "name": "eth0"})
+    for vrf in (1, 2):  # dieselbe IP in zwei VRFs
+        nbf.add("ipam/ip-addresses", {"address": "10.0.0.5/24", "vrf": {"id": vrf}})
+    changes, hints = _changes(sctx, _asset())
+    assert not any(c.label.startswith("IP an") for c in changes) and any("mehrfach" in h for h in hints)
+
+
+def test_intune_ethernet_gets_own_name_next_to_wazuh_ethernet(sctx, nbf, monkeypatch):  # noqa: F811
+    from doku_agent import discovery
+    from doku_agent.discovery import Asset, Iface
+
+    nbf.add("dcim/sites", {"slug": "hq", "name": "HQ"})
+    sctx.cfg.intune.enabled = sctx.cfg.intune.fetch_ethernet_mac = True
+    monkeypatch.setattr(discovery, "collect_assets", lambda ctx: [Asset(
+        name="laptop", serial="X1", interfaces=[Iface("Ethernet", "AA:00:00:00:00:01")],
+        sources={"wazuh": {"agent_id": "5"}, "intune": {"id": "dev-1"}})])
+    monkeypatch.setattr(discovery, "_ethernet_mac", lambda ctx, device_id: "DD:00:CC:00:00:09")  # Dock
+    discovery.run_discovery(sctx)
+    plan = next(p for p in sctx.store.list_proposals("pending") if "laptop" in p.title)
+    names = [s["data"]["name"] for s in plan.payload["steps"]
+             if s["action"] == "create" and s["endpoint"].endswith("/interfaces")]
+    assert sorted(names) == ["Ethernet", "Ethernet (Intune)"]
+
+
+def test_coverage_prefers_the_newer_last_seen(ctx):
+    from datetime import datetime, timezone
+
+    import httpx
+
+    from doku_agent.connectors.netbox import NetboxClient
+    from doku_agent.coverage import build_report
+    from doku_agent.discovery import Asset, NetboxIndex
+    from doku_agent.egress import EgressGuard
+    from tests.conftest import FakeNetbox
+
+    fake = FakeNetbox()
+    ctx.__dict__["netbox"] = NetboxClient(ctx.cfg.netbox, EgressGuard.from_config(ctx.cfg),
+                                          transport=httpx.MockTransport(fake.handler))
+    fake.add("dcim/devices", {"name": "pc1", "serial": "P1", "role": {"slug": "client"},
+                              "custom_fields": {"last_seen": "2020-01-01"}})  # Index: vor diesem Lauf
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assets = [Asset(name="pc1", serial="P1", sources={"wazuh": {"agent_id": "1", "last_seen": today}})]
+    assert build_report(ctx, assets, NetboxIndex(ctx.netbox))["stale"] == []
+
+
+# --- Entra, FortiGate, Faktenprüfung ---------------------------------------------------------------------------
+
+def test_breakglass_only_checked_where_policy_includes_the_account():
+    from doku_agent.generators.entra_docs import _includes
+
+    members = {"sales": {"u1"}, "hidden": None}.get
+    ga = "62e90394-69f5-4237-9190-012177145e10"
+    assert _includes({"includeGroups": ["sales"]}, "bg", set(), members) is False  # betrifft das Konto nicht
+    assert _includes({"includeUsers": ["All"]}, "bg", set(), members) is True
+    assert _includes({"includeRoles": [ga]}, "bg", {ga}, members) is True
+    assert _includes({"includeGroups": ["hidden"]}, "bg", set(), members) is None  # unklar -> Befund mit Hinweis
+
+
+def _forti(policies):
+    from doku_agent.generators.fortigate_docs import FortiData
+
+    return FortiData("fw", "root", {}, policies=policies, services=[{"name": "ALL", "protocol": "IP"}], addresses=[
+        {"name": "all", "type": "ipmask", "subnet": "0.0.0.0 0.0.0.0"},
+        {"name": "all", "type": "ipprefix", "ip6": "::/0", "_v6": True},
+        {"name": "net6", "type": "ipprefix", "ip6": "2001:db8::/32", "_v6": True}])
+
+
+def _rule(pid, **addr):
+    return {"policyid": pid, "name": f"r{pid}", "action": "accept", "status": "enable", "schedule": "always",
+            "srcintf": [{"name": "lan"}], "dstintf": [{"name": "wan"}], "service": [{"name": "ALL"}],
+            **{k: [{"name": v}] for k, v in addr.items()}}
+
+
+def test_fortigate_ipv4_all_does_not_shadow_ipv6_and_ipv6_any_any_is_reported():
+    from doku_agent.generators.fortigate_docs import audit
+
+    f = audit(_forti([_rule(1, srcaddr="all", dstaddr="all"), _rule(2, srcaddr6="net6", dstaddr6="all")]))
+    assert f["shadowed"] == []  # IPv4-"all" deckt keine IPv6-Regel ab
+    f = audit(_forti([_rule(3, srcaddr6="all", dstaddr6="all")]))
+    assert [r[0] for r in f["any_any"]] == ["3"]
+
+
+def test_explanations_survive_llm_outage(ctx):
+    from doku_agent.generators import fortigate_docs, wazuh_docs
+    from doku_agent.llm import LLMError
+
+    class Down(FakeLLM):
+        def json(self, system, user, schema):
+            raise LLMError("Ollama nicht erreichbar")
+
+    ctx.__dict__["llm"] = Down()
+    rules = [{"id": "100001", "xml": '<rule id="100001" level="5"/>'}]
+    assert wazuh_docs._explain_rules(ctx, "local.xml", rules) == ("", {})
+    ctx.__dict__.pop("_llm_down", None)
+    assert fortigate_docs._explain(ctx, fortigate_docs.FortiData("fw", "root", {}), [{"id": "1", "name": "r1"}]) == {}
+
+
+def test_condense_reduces_again_instead_of_cutting_off(ctx):
+    from doku_agent.llm import LLM
+
+    ctx.cfg.llm.max_input_chars = 100
+    llm = LLM(ctx.cfg.llm, ctx.guard, "de")
+    calls = []
+    llm.text = lambda system, user: calls.append(user) or "x" * 40
+    llm.condense("y" * 1000, "Zweck")
+    assert len(calls) > 10  # 10 Teile, dann die Zusammenfassungen noch einmal verdichtet
+
+
+# --- AD-Basis ----------------------------------------------------------------------------------------------------
+
+def test_site_link_to_gpo_of_other_domain_is_not_orphaned():
+    from doku_agent.connectors.ad import Entry
+    from doku_agent.generators import gpo_docs
+    from doku_agent.generators.ad_common import AdData
+    from tests.test_ad import BASE, CFG_NC
+
+    guid = "{11111111-2222-3333-4444-555555555555}"
+    data = AdData()
+    data.root = {"defaultnamingcontext": BASE}
+    data.sites = [Entry.make(f"CN=Wien,CN=Sites,{CFG_NC}", {
+        "name": "Wien", "gPLink": f"[LDAP://cn={guid},cn=policies,cn=system,DC=andere,DC=local;0]"})]
+    link = gpo_docs.links(data)[guid][0]
+    assert link.gpo_domain == "andere.local"
+    assert gpo_docs.link_text(data, data.sites[0]) == [f"1. GPO {guid} der Domäne andere.local"]
+
+
+def test_wql_with_several_queries():
+    from doku_agent.connectors.ad import Entry
+    from doku_agent.generators.gpo_docs import wql
+
+    raw = ("2;3;10;45;WQL;root\\CIMv2;SELECT * FROM Win32_OperatingSystem WHERE x=1;"
+           "3;10;24;WQL;root\\CIMv2;SELECT * FROM Win32_Bios;")
+    assert wql(Entry.make("x", {"msWMI-Parm2": raw})) == (
+        "`SELECT * FROM Win32_OperatingSystem WHERE x=1` (root\\CIMv2)<br>`SELECT * FROM Win32_Bios` (root\\CIMv2)")
+
+
+def test_ms16_072_accepts_own_computer_group():
+    from doku_agent.generators.gpo_docs import GpoAcl, computers_can_read
+    from tests.test_ad import DOM
+
+    users, pcs, admins = f"{DOM}-2001", f"{DOM}-2002", f"{DOM}-512"
+    assert computers_can_read(GpoAcl(True, apply=[users], read=[users, pcs, admins]), DOM)  # Abhilfe vorhanden
+    assert not computers_can_read(GpoAcl(True, apply=[users], read=[users, admins, "S-1-5-9"]), DOM)
+
+
+def test_referral_only_empty_where_allowed():
+    import pytest
+
+    from doku_agent.connectors.ad import AdClient, AdError
+
+    class Referral:
+        def search(self, *args, **kwargs):
+            self.result, self.response = {"result": 10, "description": "referral"}, []
+
+    assert AdClient._paged(Referral(), "DC=DomainDnsZones,DC=x", "(objectClass=*)", [], 1, None, True, True) == []
+    with pytest.raises(AdError):
+        AdClient._paged(Referral(), "DC=x", "(objectClass=*)", [], 1, None, True)
+
+
+# --- Konfiguration, Zeitplan, Upload ------------------------------------------------------------------------------
+
+def test_config_parses_tls_strings_and_reports_yaml_errors(tmp_path):
+    import pytest
+    from pydantic import TypeAdapter
+
+    from doku_agent.config import ConfigError, TlsVerify, load_config
+
+    ta = TypeAdapter(TlsVerify)
+    assert ta.validate_python("false") is False and ta.validate_python("True") is True
+    assert ta.validate_python("/config/ca.pem") == "/config/ca.pem"
+    bad = tmp_path / "config.yaml"
+    bad.write_text("wiki:\n\turl: x\n")  # Tab-Einrückung
+    with pytest.raises(ConfigError, match="kein gültiges YAML"):
+        load_config(bad)
+
+
+def test_schedule_rejects_jobs_that_need_parameters(ctx):
+    import pytest
+
+    from doku_agent.config import ScheduleEntry
+    from doku_agent.scheduler import Scheduler
+
+    ctx.cfg.schedule = [ScheduleEntry(job="netbox_device", at="02:00")]
+    with pytest.raises(ValueError, match="brauchen Parameter"):
+        Scheduler(ctx)
+
+
+def test_upload_cleans_up_and_keeps_same_named_files(ctx, monkeypatch):
+    import re
+
+    from fastapi.testclient import TestClient
+
+    import doku_agent.web.app as webapp
+
+    monkeypatch.setattr(webapp, "MAX_BYTES", 10)
+    client = TestClient(webapp.create_app(ctx), base_url="http://localhost")
+    auth = ("admin", "geheim")
+    token = re.search(r'name="csrf" value="([^"]+)"', client.get("/", auth=auth).text).group(1)
+    too_big = client.post("/auftrag", data={"csrf": token, "instruction": "x"}, auth=auth, follow_redirects=False,
+                          files=[("files", ("a.txt", b"klein")), ("files", ("b.txt", b"viel zu gross!"))])
+    assert "err=" in too_big.headers["location"] and not any(ctx.cfg.upload_dir.glob("*/*"))
+    client.post("/auftrag", data={"csrf": token, "instruction": "x"}, auth=auth, follow_redirects=False,
+                files=[("files", ("config.txt", b"eins")), ("files", ("config.txt", b"zwei"))])
+    files = ctx.store.list_jobs()[0].params["files"]
+    assert len(set(files)) == 2 and sorted(open(f, "rb").read() for f in files) == [b"eins", b"zwei"]

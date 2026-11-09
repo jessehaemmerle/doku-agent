@@ -332,8 +332,10 @@ class AdClient:
 
     # --- Suche ------------------------------------------------------------------------------
 
-    def search(self, base: str, flt: str, attrs: list[str], scope: str = "sub", sd: bool = False) -> list[Entry]:
-        """Seitenweise Suche. Fehlt die Basis (noSuchObject), ist das Ergebnis leer."""
+    def search(self, base: str, flt: str, attrs: list[str], scope: str = "sub", sd: bool = False,
+               referral_empty: bool = False) -> list[Entry]:
+        """Seitenweise Suche. Fehlt die Basis (noSuchObject), ist das Ergebnis leer; mit referral_empty auch,
+        wenn der DC die Partition nicht hält und nur verweist (Referrals werden nie verfolgt)."""
         ldap3 = _ldap3()
         scopes = {"sub": ldap3.SUBTREE, "one": ldap3.LEVEL, "base": ldap3.BASE}
         controls = None
@@ -344,7 +346,8 @@ class AdClient:
             for attempt in (1, 2):
                 conn = self._connection()
                 try:
-                    return self._paged(conn, base, flt, attrs, scopes[scope], controls, scope != "base")
+                    return self._paged(conn, base, flt, attrs, scopes[scope], controls, scope != "base",
+                                       referral_empty)
                 except ldap3.core.exceptions.LDAPException as exc:  # Verbindung abgebrochen: einmal neu
                     self.close()
                     if attempt == 2:
@@ -352,14 +355,14 @@ class AdClient:
         return []
 
     @staticmethod
-    def _paged(conn, base, flt, attrs, scope, controls, paged) -> list[Entry]:
+    def _paged(conn, base, flt, attrs, scope, controls, paged, referral_empty=False) -> list[Entry]:
         out, cookie = [], None
         while True:
             conn.search(base, flt, search_scope=scope, attributes=attrs, controls=controls,
                         paged_size=PAGE_SIZE if paged else None, paged_cookie=cookie)
             result = conn.result or {}
             code = result.get("result")
-            if code == 32:  # noSuchObject
+            if code == 32 or (code == 10 and referral_empty):  # noSuchObject bzw. Verweis auf einen anderen DC
                 return out
             if code not in (0, None):
                 raise AdError(f"LDAP-Suche in {base} mit {flt}: {result.get('description')} "
@@ -624,7 +627,10 @@ class AdClient:
                  f"CN=MicrosoftDNS,CN=System,{self.base}"]
         zones, seen = [], set()
         for base in bases:
-            for z in self.search(base, "(objectClass=dnsZone)", ["name", "dnsProperty", "whenChanged"], scope="one"):
+            # Hält der DC eine DNS-Partition nicht (kein DNS-Server, ForestDnsZones in einer anderen Domäne), kommt nur
+            # ein Verweis: die übrigen Orte trotzdem lesen, statt den ganzen DNS-Bereich scheitern zu lassen
+            for z in self.search(base, "(objectClass=dnsZone)", ["name", "dnsProperty", "whenChanged"], scope="one",
+                                 referral_empty=True):
                 if z.str("name").lower() not in seen:
                     seen.add(z.str("name").lower())
                     z.attrs["_base"] = [base.encode()]

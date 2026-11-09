@@ -59,6 +59,7 @@ class AdStructure:
         self.by_dn = {e.dn.lower(): e for e in [self.data.domain, *self.data.ous]}
         self.gpos = {g.str("cn").upper(): g for g in self.data.gpos}
         self._loopback: dict[str, int] = {}
+        self._via_primary: dict[str, set[str]] = {}
         self._subnets = []
         for s in self.data.subnets:
             try:
@@ -84,6 +85,13 @@ class AdStructure:
         if best is None:
             return None
         return next((s for s in self.data.sites if s.dn.lower() == best[1].lower()), None)
+
+    def via_primary(self, sid: str) -> set[str]:
+        """SIDs der Gruppen, in denen eine primäre Gruppe (z.B. Domänencomputer) Mitglied ist – je Lauf einmal."""
+        if sid not in self._via_primary:
+            groups = self.ctx.ad.groups_by_sid([sid])
+            self._via_primary[sid] = {g.sid() for g in self.ctx.ad.groups_of(groups[0].dn)} if groups else set()
+        return self._via_primary[sid]
 
     def loopback(self, guid: str) -> int:
         """Loopback-Modus einer GPO (UserPolicyMode in der Computer-Registry.pol), 0 = keiner."""
@@ -132,10 +140,15 @@ def effective(ctx: Context, computer: Entry, ips: list[str]) -> Effective:
     data = st.data
     site = st.site_for(ips)
     containers = ([(site, f"Standort {site.name}")] if site is not None else []) + _chain(st, computer.dn)
-    sids = {computer.sid(), "S-1-1-0", "S-1-5-11", f"{data.domain_sid}-515"}
-    sids |= {g.sid() for g in ctx.ad.groups_of(computer.dn)}
-    normal: list[tuple[str, str, bool]] = []  # (GUID, Container, erzwungen) in Anwendungsreihenfolge
-    enforced_by_level: list[list[tuple[str, str, bool]]] = []
+    # Sicherheitstoken des Computers: primäre Gruppe (515 Domänencomputer, 516 Domänencontroller) samt den Gruppen,
+    # die sie enthalten – member:IN_CHAIN folgt primaryGroupID nicht
+    primary = f"{data.domain_sid}-{computer.int('primaryGroupID', 515) or 515}"
+    sids = {computer.sid(), "S-1-1-0", "S-1-5-11", primary}
+    sids |= {g.sid() for g in ctx.ad.groups_of(computer.dn)} | st.via_primary(primary)
+    if primary.endswith("-516"):
+        sids.add("S-1-5-9")  # Organisations-Domänencontroller
+    normal: list[tuple[str, str, bool, str]] = []  # (GUID, Container, erzwungen, DN) in Anwendungsreihenfolge
+    enforced_by_level: list[list[tuple[str, str, bool, str]]] = []
     for obj, label in containers:
         if (obj.int("gPOptions", 0) or 0) & 1:
             normal = []  # Vererbung blockiert: nicht erzwungene GPOs der Ebenen darüber entfallen
@@ -143,7 +156,7 @@ def effective(ctx: Context, computer: Entry, ips: list[str]) -> Effective:
         for dn, options in gpo_docs.parse_gplink(obj.str("gPLink")):  # Dateireihenfolge = Anwendungsreihenfolge
             if options & 1:
                 continue
-            entry = (gpo_docs.gpo_guid(dn), label, bool(options & 2))
+            entry = (gpo_docs.gpo_guid(dn), label, bool(options & 2), dn)
             (level if entry[2] else normal).append(entry)
         enforced_by_level.append(level)
     # Erzwungene zuletzt, die höchste Ebene ganz zum Schluss (sie gewinnt)
@@ -151,13 +164,16 @@ def effective(ctx: Context, computer: Entry, ips: list[str]) -> Effective:
     result = Effective(computer, ou_path(parent_dn(computer.dn), data.base) or parent_dn(computer.dn),
                        site.name if site is not None else "")
     seen: set[str] = set()
-    for guid, label, enforced in reversed(order):  # höchste Priorität zuerst
+    for guid, label, enforced, dn in reversed(order):  # höchste Priorität zuerst
         if guid in seen:
             continue
         seen.add(guid)
         gpo = st.gpos.get(guid)
         if gpo is None:
-            result.skipped.append((f"gelöschte GPO {guid}", label, "GPO existiert nicht mehr"))
+            foreign = gpo_docs.foreign_domain(data, dn)
+            result.skipped.append((f"GPO {guid} der Domäne {foreign}", label, "aus einer anderen Domäne – hier nicht "
+                                   "ausgewertet") if foreign else (f"gelöschte GPO {guid}", label,
+                                                                   "GPO existiert nicht mehr"))
             continue
         name = gpo.str("displayName") or guid
         if (gpo.int("flags", 0) or 0) & 2:

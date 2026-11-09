@@ -164,6 +164,10 @@ def _effective_order(ctx, links_by_dn, blocked=(), site_gplink=""):
             self.data.sites = [Entry.make(f"CN=Wien,CN=Sites,{CFG_NC}", {"name": "Wien", "gPLink": site_gplink})]
             self.gpos = {g.str("cn").upper(): g for g in ctx.ad.gpos()}
             self.by_dn = {e.dn.lower(): e for e in [self.data.domain, *self.data.ous]}
+            self.primary_groups: dict[str, set[str]] = {}
+
+        def via_primary(self, sid):
+            return self.primary_groups.get(sid, set())
 
         def computer(self, name):
             return comp

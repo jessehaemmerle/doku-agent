@@ -21,6 +21,9 @@ for _name in ("smbprotocol", "spnego"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 MAX_FILE = 32 * 1024 * 1024  # größere Dateien gibt es in einer GPO nicht; schützt vor Speicherüberlauf
+# NTSTATUS, mit denen der Server die Sitzung bzw. Freigabe beendet: USER_SESSION_DELETED, NETWORK_SESSION_EXPIRED,
+# NETWORK_NAME_DELETED – betrifft die Verbindung, nicht eine einzelne Datei
+SESSION_GONE = {0xC0000203, 0xC000035C, 0xC00000C9}
 
 
 class SysvolError(RuntimeError):
@@ -109,8 +112,13 @@ class SysvolClient:
                     self.close()
                     if attempt == 2:
                         raise SysvolError(f"SMB-Verbindung zu {self.server} abgebrochen: {exc}") from exc
-                except SMBResponseException as exc:  # Antwort des Servers zu dieser Datei
-                    raise SysvolFileError(str(exc)) from exc
+                except SMBResponseException as exc:
+                    if exc.status in SESSION_GONE:  # Sitzung vom Server beendet: neu anmelden statt jede weitere
+                        self.close()                # Datei als "nicht lesbar" zu melden
+                        if attempt == 2:
+                            raise SysvolError(f"SMB-Sitzung zu {self.server} beendet: {exc}") from exc
+                        continue
+                    raise SysvolFileError(str(exc)) from exc  # Antwort des Servers zu dieser Datei
                 except SMBException as exc:
                     raise SysvolError(f"SYSVOL: {exc}") from exc
 
