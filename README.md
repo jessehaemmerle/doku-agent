@@ -223,7 +223,9 @@ Mit interner CA: Zertifikat nach `./ca.pem` legen, Volume in `docker-compose.yml
 **Web-Oberfläche**
 - *Freigaben*: offene Vorschläge mit Diff (Wiki) bzw. Schritt-Plan (Netbox). Vor dem Übernehmen lassen sich
   Titel, Pfad, Tags und Inhalt bzw. der Netbox-Plan (JSON) bearbeiten. *Ablehnen + Nicht mehr vorschlagen*
-  setzt das Objekt auf die Ignorierliste.
+  setzt das Objekt auf die Ignorierliste. Während der Übernahme steht ein Vorschlag auf *wird übernommen*; ein
+  zweiter Klick oder ein paralleles `approve` übernimmt ihn nicht doppelt. Bricht eine Übernahme hart ab (z.B.
+  Neustart), lässt sich der Vorschlag nach zehn Minuten wieder öffnen.
 - *Neuer Auftrag*: Stichpunkte und Dateien hochladen, optional eine Zielseite angeben.
 - *Fragen*: Frage ans Wiki stellen, Antwort mit Quellen.
 - *Wiki-Lint*: letzter Prüfbericht, „Jetzt prüfen“ startet eine neue Prüfung.
@@ -255,8 +257,10 @@ doku-agent frage "Wo läuft der Lizenzserver?"   # Antwort mit Quellen
 doku-agent lint                          # Wiki prüfen und Bericht ausgeben
 ```
 
-**Zeitplan** – in `config.yaml` unter `schedule` (Uhrzeit in `general.timezone`). Ergebnisse der nächtlichen Läufe
-liegen morgens in der Freigabe-Liste. Unveränderte Quellen erzeugen keine neuen Vorschläge, weil LLM-Texte nach
+**Zeitplan** – in `config.yaml` unter `schedule` (Uhrzeit in `general.timezone`). Einplanen lassen sich nur Jobs,
+die ohne Parameter laufen (wie bei den Start-Buttons); `netbox_device` oder ein freier Auftrag (`freeform`) werden beim
+Start abgelehnt. Ergebnisse der nächtlichen Läufe liegen morgens in der Freigabe-Liste. Unveränderte Quellen erzeugen
+keine neuen Vorschläge, weil LLM-Texte nach
 Eingabe-Hash zwischengespeichert werden und Seiten ohne Änderung übersprungen werden.
 
 ## So ergänzt der Agent bestehende Seiten
@@ -486,7 +490,9 @@ Der Job `ad` liest per LDAP (nur Suchen) und SYSVOL (nur Lesen) und schlägt die
   Dateien genannt, aber nicht ausgewertet.
 
 **Prüfung:**
-- **Gruppenrichtlinien:** gespeicherte Kennwörter in Preferences (MS14-025), nicht verknüpft oder alle Verknüpfungen
+- **Gruppenrichtlinien:** gespeicherte Kennwörter in Preferences (MS14-025), Kennwörter in Skript- und
+  Aufgaben-Aufrufen (z.B. `net use … /user:… Kennwort`, `psexec -p`; im Wiki ausgeblendet), nicht verknüpft oder
+  alle Verknüpfungen
   aus, verknüpft aber komplett deaktiviert, leer, Ordner fehlt in SYSVOL, Version in AD und SYSVOL verschieden,
   Dateipfad zeigt auf fremden Server, WMI-Filter fehlt, Computer ohne Leserecht (MS16-072), bearbeitbar für alle,
   Verknüpfungen auf gelöschte GPOs.
@@ -532,7 +538,8 @@ Verbindung zum eigentlichen CA-Dienst. Die Seite `zertifikatsdienste` listet die
 (wer sie registrieren darf, aufgelöst aus der DACL über das erweiterte Recht „Zertifikatregistrierung“, dazu
 Verwendungszwecke und Besonderheiten) und eine **Prüfung auf verbreitete Fehlkonfigurationen zur Härtung der eigenen
 Umgebung**. Über LDAP erkennbar und daher geprüft: **ESC1** (Antragsteller wählt den Namen frei + Clientauthentifizierung
-+ keine Genehmigung), **ESC2** (Beliebiger-Zweck- oder Kein-EKU-Vorlage), **ESC3** (Anforderungsbevollmächtigter),
++ keine Genehmigung), **ESC2** (Beliebiger-Zweck- oder Kein-EKU-Vorlage, auch ohne frei wählbaren Namen – taugt als
+Registrierungs-Agent), **ESC3** (Anforderungsbevollmächtigter),
 **ESC4** (nicht-privilegierte Konten dürfen die Vorlage ändern), **ESC5** (gefährliche Rechte auf PKI-Objekten),
 **ESC9** (Vorlage ohne SID-Sicherheitserweiterung), **ESC13** (Vorlage an eine Gruppe über eine Ausgaberichtlinie
 gekoppelt) und **ESC15** (Schema v1 mit Anwendungsrichtlinien). Rein CA-seitige Schwachstellen – **ESC6**
@@ -547,11 +554,16 @@ gelesen.
 Mit `dns` in `ad.include` dokumentiert der Agent die AD-integrierten DNS-Zonen aus den Anwendungspartitionen
 (`DomainDnsZones`, `ForestDnsZones`) und dem Legacy-Ort unter `System`. Die Übersicht `dns` listet alle Zonen mit Art
 und dynamischen Updates; je Zone zeigt `dns/<zone>` alle Einträge (A, AAAA, CNAME, SRV, MX, NS, PTR, TXT, SOA), aus
-dem binären `dnsRecord`-Format dekodiert, mit der Unterscheidung statisch/dynamisch. Dynamische A-Einträge, die seit
-mehr als `dns_stale_days` Tagen (Standard 180) nicht aktualisiert wurden, werden als **veraltet** markiert. Ist Netbox
-eingerichtet und `dns_netbox_sync` aktiv, erstellt der Agent zusätzlich einen **Abgleich**: Er vergleicht A/AAAA-Namen
-mit den IP-Adressen in Netbox und schlägt – nur als Vorschlag, der freigegeben werden muss – vor, fehlende `dns_name`-
-Werte an den passenden IP-Adressen bzw. Geräten zu setzen.
+dem binären `dnsRecord`-Format dekodiert, mit der Unterscheidung statisch/dynamisch. Dynamische Einträge, die seit
+mehr als `dns_stale_days` Tagen (Standard 180) nicht aufgefrischt wurden, werden als **veraltet** markiert – nur in
+Zonen mit eingeschalteter Alterung (Scavenging): ohne Alterung frischt der DNS-Server die Zeitstempel nicht auf, ein
+altes Datum sagt dann nichts. Aktuelle dynamische Einträge stehen ohne Datum in der Tabelle, damit nicht jede
+Auffrischung einen neuen Vorschlag erzeugt. Ist Netbox eingerichtet und `dns_netbox_sync` aktiv, erstellt der Agent
+zusätzlich einen **Abgleich**: Er vergleicht je IP-Adresse die A/AAAA-Namen mit dem `dns_name` in Netbox und schlägt –
+nur als Vorschlag, der freigegeben werden muss – vor, fehlende oder abweichende `dns_name`-Werte zu setzen. Namen, die
+auf die Domänencontroller zeigen, ohne deren Hostname zu sein (Zonenspitze, `DomainDnsZones`, `ForestDnsZones`),
+`_msdcs`, Dienstnamen (`_ldap._tcp …`), Platzhalter (`*`) und die Stammhinweise (`RootDNSServers`) bleiben außen vor.
+Hat eine IP mehrere Namen und steht keiner davon in Netbox, meldet der Bericht sie als *mehrdeutig* – ohne Vorschlag.
 
 ### Änderungsbericht
 
@@ -559,8 +571,12 @@ Der Job `changes` führt Buch darüber, was sich in der Doku verändert. Bei jed
 verwalteten Tabellen je stabiler Kennung gespeichert; reine Fließtext-, Übersichts- und Bewertungsblöcke bleiben außen
 vor. Daraus entsteht eine **Seite je ISO-Kalenderwoche** plus eine Übersicht, die zeigt, was neu hinzukam oder sich
 änderte: neue und geänderte GPOs, neue Firewall-Regeln, neue Mitglieder in privilegierten Gruppen, neue und behobene
-Prüf-Befunde – über alle Bereiche hinweg (Netbox, AD, Entra, FortiGate, Wazuh, Intune). Die erste Beobachtung einer
-Seite ist der Ausgangspunkt und erzeugt keine Einträge. Über `changes.keep_weeks` (Standard 26) wird festgelegt, wie
+Prüf-Befunde – über alle Bereiche hinweg (Netbox, AD, Entra, FortiGate, Wazuh, Intune). Neue Seiten erscheinen als
+„neue Seite“, sobald ihre Seitenart (z.B. GPOs, Netbox-Geräte, DNS-Zonen) schon an einem früheren Tag erfasst wurde;
+am ersten Tag einer Seitenart – beim ersten Lauf oder wenn eine Quelle später eingeschaltet wird – merkt sich der
+Agent nur den Ausgangsstand. War eine Quelle bei einem Lauf nicht lesbar und fehlt deshalb ein Abschnitt (z.B. die
+Firewall-Regeln im Steckbrief), bleibt dessen gemerkter Stand stehen, statt alle Zeilen als entfallen zu melden.
+Über `changes.keep_weeks` (Standard 26) wird festgelegt, wie
 viele Wochenseiten aufgehoben werden.
 
 ## Firewall-Dokumentation (FortiGate)
@@ -705,7 +721,9 @@ deshalb bei der Freigabe lesen. Die Tabellen darunter sind immer exakt.
 - **Ollama ohne Internet:** Der Ollama-Container hängt nur am internen Netz `llm`. Zusätzlich ist
   `OLLAMA_NO_CLOUD=1` gesetzt (keine Cloud-Modelle, keine Websuche). Nur der einmalige `ollama-pull` hat Internet.
 - **Geheimnisse:** Tokens nur in `.env` (nicht eingecheckt). In Wazuh-Konfigurationen, Intune-Einstellungen und
-  FortiGate-Objekten werden Passwörter, Keys, PSKs, Tokens und Webhooks vor dem Prompt und vor dem Wiki maskiert.
+  FortiGate-Objekten werden Passwörter, Keys, PSKs, Tokens und Webhooks vor dem Prompt und vor dem Wiki maskiert,
+  ebenso in freien Aufträgen samt hochgeladenen Dateien (Schlüssel/Wert-Paare, URLs mit Zugangsdaten, Cisco-/FortiOS-
+  Konfigurationszeilen) und in Befehlszeilen aus GPO-Skripten und geplanten Aufgaben.
 - **Entra ID:** Benutzernamen und UPNs (z.B. ausgenommene Notfallkonten) stehen in den Seiten, wenn
   `entra.user_names` nicht `count` ist. Sie gehen nur an das lokale Sprachmodell und ins eigene Wiki.
 - **Active Directory:** Das Lesekonto braucht keine Administratorrechte; der Agent schreibt nie ins AD. Kennwörter aus
@@ -714,7 +732,7 @@ deshalb bei der Freigabe lesen. Die Tabellen darunter sind immer exakt.
 - **Embeddings und Fragen** laufen über dasselbe lokale Ollama; Index und Fragen liegen in der lokalen SQLite-Datenbank.
 - **Oberfläche:** Basic-Auth (Pflicht), CSRF-Schutz, strikte Content-Security-Policy, keine externen Skripte oder Fonts,
   standardmäßig nur auf `127.0.0.1` gebunden. Der Agent-Container läuft ohne Root, mit read-only Dateisystem und
-  ohne Capabilities.
+  ohne Capabilities; auch Ollama läuft ohne Capabilities und mit `no-new-privileges`.
 - **Zugriff aus dem LAN:** Basic-Auth überträgt das Passwort nur Base64-kodiert und es gibt kein Rate-Limiting.
   Wer die Oberfläche über `localhost` hinaus freigibt, sollte einen Reverse-Proxy mit TLS davorsetzen (z.B. den
   vorhandenen Nginx/Traefik) und den Zugriff auf das Admin-Netz beschränken.

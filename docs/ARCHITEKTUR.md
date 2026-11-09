@@ -370,19 +370,60 @@ Drei aufeinander aufbauende Erweiterungen, alle wieder nur lesend und über die 
   AD auffällt.
 - AD-DNS dekodiert das binäre `dnsRecord`-Format (MS-DNSP) selbst in `ad_dns.py`: Header mit `TtlSeconds` big-endian und
   `TimeStamp` in Stunden seit 1601 (0 = statisch), `DNS_COUNT_NAME` für Namen, Typen A/AAAA/CNAME/NS/PTR/MX/SRV/TXT/SOA.
-  Dynamische A-Einträge, die länger als `dns_stale_days` nicht aktualisiert wurden, gelten als veraltet. Der Netbox-
-  Abgleich schlägt nur vor (Freigabe nötig), `dns_name` an IP-Adressen zu setzen.
+  Zoneneigenschaften (`dnsProperty`, MS-DNSP 2.3.2.1): Daten genau `DataLength` Bytes lang (`ALLOW_UPDATE` ist ein
+  einzelnes Byte), Alterung unter der Kennung `0x40`, `DataLength` 0 = Vorgabewert der Spezifikation. Dynamische
+  Einträge gelten nur in Zonen mit Alterung als veraltet – ohne Alterung frischt der DNS-Server die Zeitstempel nicht
+  auf. Die Spalte „Stand“ trägt kein wanderndes Datum (sonst bei jeder Auffrischung ein neuer Vorschlag). Der Netbox-
+  Abgleich arbeitet je IP-Adresse (eine IP hat in Netbox nur einen `dns_name`), fragt Netbox gebündelt ab
+  (`address` mehrfach, je 50) und schlägt nur vor (Freigabe nötig); DC-Aliasse, `_msdcs`, Dienstnamen, Platzhalter
+  und `RootDNSServers` bleiben außen vor, mehrere Kandidaten ohne Treffer sind „mehrdeutig“ (nur Bericht).
 
 **Feature 3 – Änderungsbericht** (`changes.py`, Haken in `pages.py`):
 - Bei jeder erzeugten Seite werden die Zeilen der verwalteten Tabellen je stabiler Kennung in der kv-Tabelle
   abgelegt und mit dem vorigen Stand verglichen; Diffs landen im Ereignis-Log. Reine Fließtext-, Übersichts- und
-  Bewertungsblöcke sind über Suffixe ausgenommen, damit formulierte Absätze keine Scheinänderungen erzeugen. Die erste
-  Beobachtung einer Seite ist der Ausgangspunkt und erzeugt keine Einträge.
+  Bewertungsblöcke sind über Suffixe ausgenommen, damit formulierte Absätze keine Scheinänderungen erzeugen. Je
+  Seitenart (`stable_id` ohne Objekt, z.B. `ad:gpo`, `netbox:device`) merkt sich `change-kinds` den Tag der ersten
+  Erfassung: Neue Seiten einer schon bekannten Seitenart werden als „neue Seite“ gemeldet, am ersten Tag einer
+  Seitenart wird nur der Ausgangsstand gemerkt. Verglichen werden nur die Abschnitte des Entwurfs – fehlt ein Abschnitt,
+  weil seine Quelle nicht lesbar war (Firewall/AD im Steckbrief), bleibt sein gemerkter Stand stehen.
 - Der Job `changes` baut daraus eine Seite je ISO-Kalenderwoche plus eine Übersicht. `changes.keep_weeks` begrenzt die
   Zahl der Wochenseiten.
 
 **Testdaten (`tests/samba_ad/setup.sh`):** eine verwundbare Vorlage (`VulnUserAuth`, ESC1), eine sichere
-(`SafeTemplate`, Genehmigung nötig), eine CA und ein dynamischer A-Eintrag (`app01`). Die Vorlagen-DACLs enthalten –
+(`SafeTemplate`, Genehmigung nötig), eine CA und ein A-Eintrag (`app01`; `samba-tool dns` kennt kein `-H` – ein
+früher verschluckter Fehler, durch den der Eintrag nie angelegt wurde). Die Vorlagen-DACLs enthalten –
 wie im echten AD – ein Leserecht für Authentifizierte Benutzer (`(A;;LCRPLORC;;;AU)`), sonst könnte der normale
 Domänenbenutzer `doku-reader` die Objekte nicht einmal aufzählen. Der Integrationstest prüft gegen diesen Samba-DC,
 dass ESC1 für `VulnUserAuth` anschlägt, `SafeTemplate` sauber bleibt und die DNS-Zone den Eintrag `app01` zeigt.
+
+## Code-Review der gesamten Codebasis (09.11.2026)
+
+Vollständige Durchsicht mit den Skills code-review, security-review, docker-development und a11y-audit; jeder Befund
+wurde einzeln nachvollzogen und nur bestätigte behoben, jeweils mit Regressionstest (`tests/test_review_round2.py`,
+`tests/test_ad_features.py`), der am alten Code scheitert.
+
+- **Geheimnisse:** Maskierung zentral in `generators/common.py` (`mask_tree`, `scrub_text`, `scrub_command`): Namen
+  wie `key`, `secret_value`, `Pre-shared key` gelten als geheim, Beschriftungsfelder (`name`, `displayName`, `omaUri`)
+  bleiben stehen. Freie Aufträge werden samt Anweisung und Dateien vor dem ersten Prompt bereinigt; GPO-Skripte,
+  geplante Aufgaben und Verknüpfungen blenden Kennwörter in Befehlszeilen aus (`net use`, `psexec -p`, `/RP`,
+  `-Password`, `ConvertTo-SecureString`) und die AD-Prüfung meldet sie als Befund.
+- **Freigaben:** Übernahme beansprucht den Vorschlag atomar (`pending` → `applying` per bedingtem `UPDATE`), damit
+  Doppelklick oder paralleles `approve` nicht zweimal schreiben; hängengebliebene Übernahmen lassen sich nach zehn
+  Minuten wieder öffnen. Ablehnen wirkt nicht mehr auf bereits übernommene Vorschläge.
+- **RSoP:** Das Token enthält die Primärgruppe (`primaryGroupID`, 515/516 – `member:IN_CHAIN` folgt ihr nicht) und
+  für DCs `S-1-5-9`; GPO-Verknüpfungen auf GPOs anderer Domänen gelten nicht als verwaist.
+- **Konnektoren:** SNMP bricht bei Fehlern mitten im Walk ab statt Teilergebnisse zu liefern; vCenter meldet sich bei
+  401 neu an; SYSVOL meldet sich nach einer vom Server beendeten Sitzung neu an, statt jede weitere Datei als unlesbar zu
+  führen; Entra cacht keine vorübergehenden Fehler.
+- **Sprachmodell:** Fällt Ollama während eines Laufs aus, versuchen Wazuh- und FortiGate-Erklärungen es nicht für jede
+  Regel erneut; Erklärungen laufen durch die Faktenprüfung.
+- **Docker:** Laufzeit-Image übernimmt nur die venv aus dem Build (vorher blieb die Wheel-Schicht trotz `rm` im Image,
+  454 → 386 MB); Abhängigkeiten liegen in einer eigenen, cachebaren Schicht. Ollama läuft ohne Capabilities – geprüft
+  mit Server, Modellliste und Inferenz.
+- **Oberfläche (WCAG 2.2):** Sprunglink, Feldränder mit 3:1 Kontrast (1.4.11), Zähler mit Screenreader-Text statt
+  `aria-label` auf `span`, `scope="row"` in Schlüssel/Wert-Tabellen. Vorschläge ohne Zuordnungsgrund zeigten
+  „Gefunden über .“.
+- **Gegen echte Dienste geprüft:** Samba-AD-DC (4 Tests), Netbox 4.7.2 (8), Wiki.js 2.5 (4), Ollama 0.34.4 (1); Wazuh
+  und SNMP-Simulator nicht erneut (keine Änderungen an deren Schnittstellen).
+- **Bewusst nicht geändert:** Einzelne LDAP-Abfragen je Name bei der Namensauflösung (ca. 1 s je Lauf gegenüber
+  Minuten für das Sprachmodell; ein Umbau auf Sammelabfragen brächte mehr Komplexität als Nutzen).
