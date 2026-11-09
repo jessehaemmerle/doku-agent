@@ -124,7 +124,10 @@ class FakeNetbox:
             return httpx.Response(403, json={"detail": "You do not have permission to perform this action."})
         store = self.objects.setdefault(endpoint, {})
         if request.method == "GET" and oid is None:
-            params = {k: v for k, v in request.url.params.items() if k not in ("limit", "offset")}
+            params: dict[str, list[str]] = {}  # Mehrfachwerte (?address=a&address=b) wie in Netbox: ODER je Filter
+            for k, v in request.url.params.multi_items():
+                if k not in ("limit", "offset"):
+                    params.setdefault(k, []).append(v)
             def ref_id(value):
                 return value.get("id") if isinstance(value, dict) else value
 
@@ -140,7 +143,8 @@ class FakeNetbox:
                 if k.endswith("_id") and k not in o:
                     return str(ref_id(o.get(k[:-3]))) == v
                 return str(ref_id(o.get(k))) == v
-            results = [o for o in store.values() if all(matches(o, k, v) for k, v in params.items())]
+            results = [o for o in store.values()
+                       if all(any(matches(o, k, v) for v in vs) for k, vs in params.items())]
             return httpx.Response(200, json={"count": len(results), "next": None, "results": results})
         if request.method == "GET":
             if oid not in store:

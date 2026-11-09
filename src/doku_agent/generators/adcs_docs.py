@@ -182,13 +182,16 @@ def audit(ctx: Context, data: AdData, names: AdNames) -> list[list]:
         low_write = _low_priv(t.write_sids, names)
         names.resolve(t.enroll_sids + t.write_sids)
         published_low = t.published_on and low_enroll and not t.manager_approval and t.ra_signatures == 0
+        # ESC1: Name frei wählbar + zur Anmeldung nutzbar (dazu zählen auch "beliebiger Zweck" und gar keine
+        # Einschränkung). ESC2 hängt nicht am frei wählbaren Namen: ein Zertifikat für jeden Zweck taugt auch als
+        # Registrierungs-Agent, mit dem sich Zertifikate für andere beantragen lassen.
         if published_low and t.supplies_subject and t.client_auth:
-            kind = "ESC1" if t.ekus and ANY_PURPOSE not in t.ekus else "ESC2"
-            findings.append([kind, t.name, f"nicht-privilegierte Konten ({', '.join(low_enroll)}) dürfen sich "
-                                           "registrieren, den Namen frei wählen und das Zertifikat zur Anmeldung "
-                                           "nutzen – Genehmigung aus"])
-        if published_low and (not t.ekus or ANY_PURPOSE in t.ekus) and t.supplies_subject:
-            findings.append(["ESC2", t.name, "Vorlage erlaubt beliebigen Verwendungszweck (oder keine Einschränkung)"])
+            findings.append(["ESC1", t.name, f"nicht-privilegierte Konten ({', '.join(low_enroll)}) dürfen sich "
+                                             "registrieren, den Namen frei wählen und das Zertifikat zur Anmeldung "
+                                             "nutzen – Genehmigung aus"])
+        if published_low and (not t.ekus or ANY_PURPOSE in t.ekus):
+            findings.append(["ESC2", t.name, "Vorlage erlaubt beliebigen Verwendungszweck (oder keine Einschränkung) "
+                                             "– das Zertifikat taugt auch als Registrierungs-Agent"])
         if published_low and CERT_REQUEST_AGENT in t.ekus:
             findings.append(["ESC3", t.name, "Vorlage stellt Registrierungs-Agent-Zertifikate aus, für "
                                              "nicht-privilegierte Konten offen"])

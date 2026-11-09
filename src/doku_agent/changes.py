@@ -105,9 +105,23 @@ def _label(block_id: str, added: bool) -> str:
     return "neuer Eintrag" if added else "Eintrag entfällt"
 
 
+KINDS_KEY = "change-kinds"  # Seitenart (stable_id ohne Objekt) -> Tag, an dem sie zuerst erfasst wurde
+
+
+def _kind(stable_id: str) -> str:
+    """'netbox:device:12' -> 'netbox:device', 'ad:gpo:{…}' -> 'ad:gpo', 'ad:domain' -> 'ad'."""
+    parts = stable_id.split(":")
+    return ":".join(parts[:2]) if len(parts) >= 3 else parts[0]
+
+
 def record(ctx: Context, stable_id: str, title: str, content: str, block_ids: list[str]) -> None:
-    """Stand einer Seite festhalten und Änderungen gegenüber dem letzten Stand protokollieren. Beim ersten
-    Mal wird nur der Stand gemerkt (kein Schwall von Ereignissen für bereits bestehende Seiten)."""
+    """Stand einer Seite festhalten und Änderungen gegenüber dem letzten Stand protokollieren.
+
+    Neue Seiten werden gemeldet, sobald ihre Seitenart schon an einem früheren Tag erfasst wurde. Am ersten Tag
+    einer Seitenart (erster Lauf, oder eine Quelle wird später eingeschaltet) wird nur der Stand gemerkt – kein
+    Schwall von Ereignissen für Seiten, die es längst gibt. Verglichen werden nur die Abschnitte des Entwurfs:
+    fehlt ein Abschnitt, weil seine Quelle gerade nicht lesbar war, bleibt sein gemerkter Stand stehen, statt
+    alle Zeilen als entfallen (und beim nächsten Lauf als neu) zu melden."""
     if not ctx.cfg.changes.enabled:
         return
     key = STATE_PREFIX + stable_id
@@ -115,24 +129,34 @@ def record(ctx: Context, stable_id: str, title: str, content: str, block_ids: li
     current = snapshot(content, block_ids)
     today = datetime.now(ZoneInfo(ctx.cfg.general.timezone)).date().isoformat()
     area = _area(stable_id)
+    if ctx.store.kv_get("change-start") is None:
+        ctx.store.kv_set("change-start", today)  # Beginn der Aufzeichnung (für den Bericht)
+    kinds = ctx.store.kv_get(KINDS_KEY) or {}
+    kind = _kind(stable_id)
+    if kind not in kinds:
+        kinds[kind] = today
+        ctx.store.kv_set(KINDS_KEY, kinds)
     events: list[Event] = []
+    compared = {b for b in block_ids if not _skip(b)}
+    old_rows: dict[str, list[str]] = (prev or {}).get("rows", {})
     if prev is None:
-        if ctx.store.kv_get(LOG_KEY) is None and ctx.store.kv_get("change-start") is None:
-            ctx.store.kv_set("change-start", today)  # Beginn der Aufzeichnung (für den Bericht)
-    else:
-        if not prev.get("rows") and current:
+        if kinds[kind] < today:
             events.append(Event(today, area, title, "", "neue Seite", ""))
+    else:
         for bid, rows in current.items():
-            old = set(prev.get("rows", {}).get(bid, []))
+            old = set(old_rows.get(bid, []))
             for row in rows:
                 if row not in old:
                     events.append(Event(today, area, title, bid, _label(bid, True), row))
-        for bid, rows in prev.get("rows", {}).items():
+        for bid, rows in old_rows.items():
+            if bid not in compared:
+                continue  # Abschnitt diesmal nicht berechnet (Quelle nicht lesbar) – nichts entfällt
             new = set(current.get(bid, []))
             for row in rows:
                 if row not in new:
                     events.append(Event(today, area, title, bid, _label(bid, False), row))
-    ctx.store.kv_set(key, {"title": title, "rows": current, "at": today})
+    kept = {bid: rows for bid, rows in old_rows.items() if bid not in compared}
+    ctx.store.kv_set(key, {"title": title, "rows": {**kept, **current}, "at": today})
     if events:
         _append(ctx, events)
 

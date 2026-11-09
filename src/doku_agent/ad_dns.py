@@ -92,24 +92,32 @@ def _record_value(name: str, data: bytes) -> str:
 
 PROP_TYPE = 0x00000001
 PROP_ALLOW_UPDATE = 0x00000002
-PROP_AGING_STATE = 0x00000005
+PROP_AGING_STATE = 0x00000040
+# Vorgabewerte bei DataLength 0 (MS-DNSP 2.3.2.1.1); für ALLOW_UPDATE nennt die Spezifikation keinen
+DEFAULTS = {PROP_TYPE: 1, PROP_AGING_STATE: 0}
 ZONE_TYPE = {0: "Cache", 1: "primär", 2: "sekundär", 3: "Stub", 4: "Weiterleitung"}
 UPDATE = {0: "keine", 1: "nicht sicher und sicher", 2: "nur sicher"}
 
 
 def parse_properties(blobs: list[bytes]) -> dict[str, object]:
-    """dnsProperty-Werte -> {zone_type, allow_update, aging}."""
+    """dnsProperty-Werte -> {zone_type, allow_update, aging}.
+
+    Layout: DataLength(4), NameLength(4), Flag(4), Version(4), Id(4), Data(DataLength), Name(1). Die Daten sind
+    unterschiedlich breit – ALLOW_UPDATE ist z.B. ein einzelnes Byte –, daher genau DataLength Bytes lesen."""
     out: dict[str, object] = {}
     for blob in blobs:
         if len(blob) < 20:
             continue
-        data_len, _, _, prop_id = struct.unpack_from("<IIII", blob, 0)
-        # Layout: DataLength(4), NameLength(4), Flag(4), Version(4), Id(4), Data(DataLength), Name(1)
-        prop_id = struct.unpack_from("<I", blob, 16)[0]
-        data = blob[20:20 + max(data_len, 4)]
-        if len(data) < 4:
-            continue
-        value = struct.unpack_from("<I", data, 0)[0]
+        data_len, prop_id = struct.unpack_from("<I", blob, 0)[0], struct.unpack_from("<I", blob, 16)[0]
+        if data_len == 0:
+            if prop_id not in DEFAULTS:
+                continue
+            value = DEFAULTS[prop_id]
+        else:
+            data = blob[20:20 + data_len]
+            if len(data) < data_len or data_len > 4:
+                continue  # abgeschnitten, oder keine Zahl (Serverlisten, Namen …) – hier nicht gebraucht
+            value = int.from_bytes(data, "little")
         if prop_id == PROP_TYPE:
             out["zone_type"] = ZONE_TYPE.get(value, str(value))
         elif prop_id == PROP_ALLOW_UPDATE:
