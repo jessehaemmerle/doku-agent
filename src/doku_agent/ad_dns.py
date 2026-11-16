@@ -51,7 +51,10 @@ def parse_dns_record(blob: bytes) -> DnsRecord | None:
     data = blob[24:24 + data_len]
     name = TYPES.get(rtype, f"TYPE{rtype}")
     static = stamp_hours == 0
-    stamp = None if static else EPOCH + timedelta(hours=stamp_hours)
+    try:
+        stamp = None if static else EPOCH + timedelta(hours=stamp_hours)
+    except OverflowError:  # unsinniger Zeitstempel (Jahr > 9999): dynamisch ohne Datum, statt die Zone scheitern zu lassen
+        stamp = None
     value = _record_value(name, data)
     return DnsRecord(name, value, ttl, static, stamp)
 

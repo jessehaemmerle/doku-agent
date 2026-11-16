@@ -290,7 +290,10 @@ class AuditSetting:
 def parse_audit_csv(data: bytes) -> list[AuditSetting]:
     """audit.csv: Machine Name, Policy Target, Subcategory, Subcategory GUID, Inclusion Setting, Exclusion Setting,
     Setting Value."""
-    rows = list(csv.reader(io.StringIO(decode_text(data))))
+    try:
+        rows = list(csv.reader(io.StringIO(decode_text(data))))
+    except csv.Error as exc:  # kein ValueError – würde sonst die ganze GPO statt nur diese Datei scheitern lassen
+        raise GpoFileError(f"audit.csv nicht lesbar: {exc}") from exc
     if not rows:
         return []
     header = [h.strip().lower() for h in rows[0]]

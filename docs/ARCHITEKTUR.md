@@ -427,3 +427,25 @@ wurde einzeln nachvollzogen und nur bestätigte behoben, jeweils mit Regressions
   und SNMP-Simulator nicht erneut (keine Änderungen an deren Schnittstellen).
 - **Bewusst nicht geändert:** Einzelne LDAP-Abfragen je Name bei der Namensauflösung (ca. 1 s je Lauf gegenüber
   Minuten für das Sprachmodell; ein Umbau auf Sammelabfragen brächte mehr Komplexität als Nutzen).
+
+## Dritte Durchsicht: statische Analyse und Robustheit (16.11.2026)
+
+Werkzeuge: ruff, mypy, bandit, pip-audit, vulture, coverage; dazu code-review über die Änderungen der zweiten Runde,
+eine Laufzeitprobe aller regulären Ausdrücke und zufällig beschädigte Eingaben für die Parser.
+
+- **Laufzeit der Maskierung:** `scrub_text` (zweite Runde) lief quadratisch in der Zeilenlänge – 40.000 Zeichen ohne
+  Trennzeichen (Base64, minifiziertes JSON) brauchten 44 s. Muster beginnen jetzt nur am Wortanfang
+  (`(?<![\w…])` statt `\b` bzw. ohne Anker); gleiches für Markdown-Links und Aufzählungen. Ein Test misst die Laufzeit.
+- **Abhängigkeiten:** `pypdf >= 6.21.4` und `pyasn1 >= 0.6.5` (Endlosschleifen bzw. quadratische Laufzeit bei
+  präparierten PDFs und BER-Antworten von LDAP/SNMP). `pyasn1` ist nur indirekt nötig, die Untergrenze steht deshalb
+  ausdrücklich in `pyproject.toml`.
+- **Parser:** `csv.Error` in `audit.csv`, abgeschnittene Sicherheitsbeschreibungen und unsinnige DNS-Zeitstempel
+  betreffen nur noch die eine Datei bzw. das eine Objekt statt der ganzen Seite.
+- **XML:** `xml.etree` bleibt – expat (>= 2.4.1) begrenzt die Entity-Vervielfachung, externe Entities werden nicht
+  aufgelöst; geprüft mit „Billion Laughs“, quadratischer Vervielfachung und `SYSTEM`-Entity.
+- **AD CS:** Das Flag `CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT_ALT_NAME` zählt bewusst nicht für ESC1 – die CA ignoriert
+  es (MS-WCCE 3.2.2.6.2.1.4.5.9), nur `ENROLLEE_SUPPLIES_SUBJECT` lässt Namen aus dem Antrag zu.
+- **Tests:** Kommandozeile (vorher 0 %) und Textgewinnung aus Uploads; Dateien ohne auslesbaren Text (gescanntes PDF)
+  werden als übersprungen gemeldet. Gesamtabdeckung 85 %.
+- **Nicht geändert:** die rund 200 mypy-Meldungen (Folge lockerer Typen, einzeln geprüft: keine Laufzeitfehler).
+

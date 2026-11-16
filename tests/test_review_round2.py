@@ -496,3 +496,21 @@ def test_markdown_patterns_stay_fast_on_degenerate_lines():
     assert changes._LINK.sub(r"\1", "| [srv1](/it/srv1) | x |") == "| srv1 | x |"
     assert len(narrative._BULLET.findall("- a\n\n  * b\n3. c\ntext")) == 3
     assert markdown.replace_links("siehe [a](/alt) und [b](/x)", {"/alt": "/neu"}) == "siehe [a](/neu) und [b](/x)"
+
+
+def test_parsers_survive_damaged_input():
+    """Beschädigte Eingaben dürfen nur die eine Datei bzw. das eine Objekt betreffen, nicht die ganze Seite."""
+    import struct
+    import pytest
+    from doku_agent import ad_acl, ad_dns
+    from doku_agent.ad_acl import ALLOWED, FULL_CONTROL, Ace, sd_bytes
+    with pytest.raises(gpo_files.GpoFileError):  # csv.Error ist kein ValueError
+        gpo_files.parse_audit_csv(b'a,b\r\n"x\ry",1\r\n,System,Lo\rgon,{g},Success,,1\r\n')
+    good = sd_bytes([Ace(ALLOWED, 0, FULL_CONTROL, "S-1-5-21-1-2-3-512")], owner="S-1-5-21-1-2-3-512")
+    assert ad_acl.parse_sd(good).dacl
+    for cut in range(20, len(good)):  # an jeder Stelle abgeschnitten: None oder ein Ergebnis, nie eine Ausnahme
+        ad_acl.parse_sd(good[:cut])
+    assert ad_acl.parse_sd(good[:20] + b"\xff" * 12) is None
+    rec = struct.pack("<HH", 4, 1) + bytes([5, 0]) + bytes(14) + struct.pack("<I", 0xFFFFFFF0) + bytes([10, 0, 0, 1])
+    parsed = ad_dns.parse_dns_record(rec)
+    assert parsed.value == "10.0.0.1" and not parsed.static and parsed.stamp is None

@@ -203,6 +203,13 @@ def parse_sd(raw: bytes | None) -> SecurityDescriptor | None:
     """Self-relative SECURITY_DESCRIPTOR; None, wenn nichts gelesen wurde (z.B. fehlende Berechtigung)."""
     if not raw or len(raw) < 20:
         return None
+    try:
+        return _parse_sd(raw)
+    except (IndexError, ValueError, struct.error):  # abgeschnitten oder beschädigt: wie nicht gelesen behandeln
+        return None
+
+
+def _parse_sd(raw: bytes) -> SecurityDescriptor:
     _, _, control, off_owner, off_group, _, off_dacl = struct.unpack_from("<BBHIIII", raw, 0)
     sd = SecurityDescriptor(protected=bool(control & SE_DACL_PROTECTED), dacl_present=bool(control & SE_DACL_PRESENT))
     if off_owner:
