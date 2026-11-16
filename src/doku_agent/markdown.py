@@ -75,11 +75,6 @@ def find_section(md: str, title: str) -> Section | None:
     return None
 
 
-def has_block(md: str, block_id: str) -> bool:
-    begin, end = block_markers(block_id)
-    return begin in md and end in md
-
-
 def upsert_block(md: str, block_id: str, content: str, heading: str | None = None, level: int = 2,
                  before_block: str | None = None) -> str:
     """Ersetzt den Inhalt eines verwalteten Blocks. Fehlt er, kommt er unter die passende Überschrift,

@@ -13,7 +13,6 @@ import pytest
 from doku_agent import semantic
 from doku_agent.embeddings import Embedder
 from doku_agent.egress import EgressGuard
-from tests.conftest import make_config
 
 URL = os.environ.get("DOKU_IT_OLLAMA_URL")
 pytestmark = pytest.mark.skipif(not URL, reason="kein Test-Ollama konfiguriert")

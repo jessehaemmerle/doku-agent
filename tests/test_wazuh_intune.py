@@ -7,7 +7,7 @@ from doku_agent.egress import EgressGuard
 from doku_agent.generators import wazuh_docs
 from doku_agent.generators.common import mask_value, mask_xml, parse_xml_fragment
 from doku_agent.generators.intune_docs import flatten, settings_catalog_rows
-from tests.conftest import FakeLLM, make_config
+from tests.conftest import FakeLLM
 
 RULES = """<!-- Lokale Regeln -->
 <group name="local,syslog,sshd,">

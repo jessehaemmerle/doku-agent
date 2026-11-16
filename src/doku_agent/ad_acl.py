@@ -159,11 +159,6 @@ class Ace:
     def inherit_only(self) -> bool:
         return bool(self.flags & INHERIT_ONLY)
 
-    @property
-    def applies_here(self) -> bool:
-        """Wirkt auf das Objekt selbst (nicht nur auf Unterobjekte)."""
-        return not self.inherit_only and self.inherited_object_type is None
-
     def grants(self, right: int) -> bool:
         return self.allow and bool(self.mask & right or self.mask & GENERIC_ALL)
 
@@ -287,8 +282,6 @@ class GuidNames:
             return RIGHT_NAMES.get(right[0], right[0])
         return guid
 
-    def is_class(self, guid: str | None) -> bool:
-        return bool(guid) and self.schema.get(guid.lower(), ("", ""))[1] == "class"
 
 
 def is_admin(sid: str) -> bool:

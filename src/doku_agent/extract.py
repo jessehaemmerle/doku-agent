@@ -12,6 +12,15 @@ class ExtractError(ValueError):
 
 
 def extract_text(path: Path) -> str:
+    """Text der Datei. ExtractError, wenn sie zu groß, binär oder ohne auslesbaren Text ist – sonst stünde die
+    Datei scheinbar berücksichtigt im Material, ohne etwas beizutragen (typisch: gescanntes PDF)."""
+    text = _read(path)
+    if not text.strip():
+        raise ExtractError(f"{path.name}: kein auslesbarer Text (gescanntes Dokument? Texterkennung gibt es nicht)")
+    return text
+
+
+def _read(path: Path) -> str:
     if path.stat().st_size > MAX_BYTES:
         raise ExtractError(f"{path.name}: Datei größer als 20 MB")
     suffix = path.suffix.lower()

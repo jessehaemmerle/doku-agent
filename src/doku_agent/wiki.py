@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 
 import httpx
@@ -48,10 +47,6 @@ class Page(PageInfo):
     script_css: str = ""
     script_js: str = ""
     hash: str = ""
-
-    @property
-    def content_hash(self) -> str:
-        return hashlib.sha256(self.content.encode()).hexdigest()
 
 
 def normalize_path(path: str) -> str:

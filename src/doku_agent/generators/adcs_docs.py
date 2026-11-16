@@ -13,7 +13,6 @@ missbrauchen könnte, damit sie korrigiert werden. Konkrete Angriffsschritte ste
 
 from __future__ import annotations
 
-import struct
 from dataclasses import dataclass, field
 
 from doku_agent import markdown
@@ -32,7 +31,8 @@ def _sids(names: AdNames, sids: list[str]) -> str:
 
 # msPKI-Certificate-Name-Flag
 ENROLLEE_SUPPLIES_SUBJECT = 0x00000001
-ENROLLEE_SUPPLIES_SAN = 0x00010000
+# CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT_ALT_NAME (0x00010000) zählt bewusst nicht: die CA ignoriert es, nur 0x1 lässt
+# Name und alternativen Namen aus dem Antrag zu (MS-WCCE 3.2.2.6.2.1.4.5.9)
 # msPKI-Enrollment-Flag
 PEND_ALL_REQUESTS = 0x00000002  # Genehmigung durch einen Zertifikatmanager
 NO_SECURITY_EXTENSION = 0x00080000  # ESC9 (SID-Sicherheitserweiterung weggelassen)
@@ -57,19 +57,6 @@ def eku_name(oid: str) -> str:
     return EKU_NAMES.get(oid, oid)
 
 
-def _expiry(raw: bytes | None) -> str:
-    """pKIExpirationPeriod: 8 Byte, negative 100-ns-Intervalle. Als grobe Dauer in Tagen/Jahren."""
-    if not raw or len(raw) < 8:
-        return ""
-    value = struct.unpack("<q", raw[:8])[0]
-    seconds = abs(value) // 10_000_000
-    days = seconds // 86400
-    if days >= 365:
-        years = days / 365
-        return f"{years:.0f} Jahre" if years >= 2 else "1 Jahr"
-    return f"{days} Tage"
-
-
 @dataclass
 class Template:
     entry: Entry
@@ -79,7 +66,6 @@ class Template:
     write_sids: list[str]  # SIDs mit gefährlichem Schreibrecht (ohne Administratoren)
     ekus: list[str]
     supplies_subject: bool
-    supplies_san: bool
     manager_approval: bool
     ra_signatures: int
     no_security_ext: bool
@@ -123,7 +109,7 @@ def _templates(data: AdData) -> list[Template]:
         out.append(Template(
             entry=e, name=name, schema=e.int("msPKI-Template-Schema-Version", 1) or 1,
             enroll_sids=enroll, write_sids=write, ekus=list(dict.fromkeys(ekus)),
-            supplies_subject=bool(flags & ENROLLEE_SUPPLIES_SUBJECT), supplies_san=bool(flags & ENROLLEE_SUPPLIES_SAN),
+            supplies_subject=bool(flags & ENROLLEE_SUPPLIES_SUBJECT),
             manager_approval=bool(enr & PEND_ALL_REQUESTS), ra_signatures=e.int("msPKI-RA-Signature", 0) or 0,
             no_security_ext=bool(enr & NO_SECURITY_EXTENSION), policy_oids=e.strs("msPKI-Certificate-Policy"),
             published_on=published.get((e.str("cn") or "").lower(), [])))

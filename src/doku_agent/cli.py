@@ -36,6 +36,10 @@ def cmd_run(args) -> int:
     if args.job not in JOBS:
         print(f"Unbekannter Job. Verfügbar: {', '.join(JOBS)}", file=sys.stderr)
         return 2
+    bad = [p for p in args.param if "=" not in p]
+    if bad:
+        print(f"--param erwartet schlüssel=wert, nicht: {', '.join(bad)}", file=sys.stderr)
+        return 2
     params = dict(p.split("=", 1) for p in args.param)
     ctx = _ctx(args)
     job_id, ok = run_now(ctx, args.job, params)
@@ -209,7 +213,7 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_doc)
 
     p = sub.add_parser("proposals", help="Vorschläge auflisten")
-    p.add_argument("--status", default="pending", help="pending|applied|rejected|failed oder leer für alle")
+    p.add_argument("--status", default="pending", help="pending|applying|applied|rejected|failed oder leer für alle")
     p.set_defaults(fn=cmd_proposals)
 
     p = sub.add_parser("show", help="Vorschlag mit Diff anzeigen")

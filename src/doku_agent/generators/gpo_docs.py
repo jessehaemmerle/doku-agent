@@ -25,8 +25,6 @@ GUID_RE = re.compile(r"\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 GPLINK_RE = re.compile(r"\[LDAP://([^;\]]+);(\d+)\]", re.I)
 STATUS = {0: "Aktiviert", 1: "Benutzerkonfiguration deaktiviert", 2: "Computerkonfiguration deaktiviert",
           3: "Alle Einstellungen deaktiviert"}
-DEFAULT_DOMAIN_POLICY = "{31B2F340-016D-11D2-945F-00C04FB984F9}"
-DEFAULT_DC_POLICY = "{6AC1786C-016F-11D2-945F-00C04FB984F9}"
 
 # Clientseitige Erweiterungen (CSE-GUIDs aus den MS-GP*-Spezifikationen)
 CSE_NAMES = {

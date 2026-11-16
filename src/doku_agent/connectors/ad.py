@@ -416,10 +416,6 @@ class AdClient:
     def schema(self) -> str:
         return self.root()["schemanamingcontext"]
 
-    def whoami(self) -> str:
-        with self._lock:
-            return str(self._connection().extend.standard.who_am_i() or "")
-
     def one(self, dn: str, attrs: list[str], sd: bool = False) -> Entry | None:
         found = self.search(dn, "(objectClass=*)", attrs, scope="base", sd=sd)
         return found[0] if found else None
@@ -603,7 +599,7 @@ class AdClient:
                                "cn", "displayName", "msPKI-Certificate-Name-Flag", "msPKI-Enrollment-Flag",
                                "msPKI-RA-Signature", "msPKI-RA-Application-Policies", "pKIExtendedKeyUsage",
                                "msPKI-Certificate-Application-Policy", "msPKI-Certificate-Policy",
-                               "msPKI-Template-Schema-Version", "msPKI-Cert-Template-OID", "pKIExpirationPeriod",
+                               "msPKI-Template-Schema-Version", "msPKI-Cert-Template-OID",
                                "revision", "whenChanged", "nTSecurityDescriptor"], scope="one", sd=True)
 
     def enrollment_services(self) -> list[Entry]:
