@@ -453,3 +453,29 @@ def test_base_layout_has_skip_link_and_readable_counter(ctx):
     assert '<a class="skip" href="#inhalt">' in html and '<main id="inhalt">' in html
     assert html.index('class="skip"') < html.index("<nav")  # erstes fokussierbares Element
     assert '<span class="sr-only"> offen</span>' in html and 'aria-label="1 offen"' not in html
+
+
+def test_scrub_text_stays_fast_on_long_lines_without_separators():
+    """Base64-Blöcke und minifiziertes JSON: die Maskierung darf nicht quadratisch in der Zeilenlänge laufen."""
+    import time
+    blob = "QUJD" * 100_000  # 400.000 Zeichen in einer Zeile
+    start = time.monotonic()
+    out, found = scrub_text(f'{{"cert":"{blob}","password":"geheim1"}}\nPasswort: geheim2\n{blob}')
+    assert time.monotonic() - start < 5
+    assert found and "geheim1" not in out and "geheim2" not in out and blob in out
+    for shape in ("wort-", "a.b", "a:b", "-p", "a+b"):  # Ketten aus Wortzeichen und Trennern
+        start = time.monotonic()
+        scrub_text(shape * 100_000)
+        assert time.monotonic() - start < 5, shape
+    assert scrub_text('<add name="x" password="geheim3"/> https://user:geheim4@host/x')[0].count("***") == 2
+
+
+def test_reject_while_applying_names_the_state(ctx):
+    import pytest
+    from doku_agent.apply import ApplyError, reject_proposal
+    pid = ctx.store.add_proposal("netbox_plan", "x", {"steps": []}, summary="s")
+    ctx.store.transition_proposal(pid, ("pending",), "applying")
+    with pytest.raises(ApplyError, match="wird gerade übernommen"):
+        reject_proposal(ctx, pid)
+    with pytest.raises(ApplyError, match="nicht gefunden"):
+        reject_proposal(ctx, 9999)

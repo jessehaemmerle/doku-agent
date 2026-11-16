@@ -91,12 +91,14 @@ def mask_tree(value, key: str = ""):
 # --- Freitext und Befehlszeilen ------------------------------------------------------------------------------
 
 _XML_PAIR = re.compile(r"<(?P<tag>[A-Za-z_][\w:.\-]*)(?P<attrs>[^<>]*)>(?P<val>[^<]+)</(?P=tag)>")
-_XML_ATTR = re.compile(r"(?P<key>\b[A-Za-z_][\w:.\-]*)(?P<sep>\s*=\s*)(?P<q>[\"'])(?P<val>[^\"'<>]*)(?P=q)")
+_XML_ATTR = re.compile(r"(?P<key>(?<![\w:.\-])[A-Za-z_][\w:.\-]*)(?P<sep>\s*=\s*)(?P<q>[\"'])(?P<val>[^\"'<>]*)(?P=q)")
 _JSON_PAIR = re.compile(r"(?P<key>\"[^\"\n]{1,60}\")(?P<sep>\s*:\s*)(?P<val>\"(?:[^\"\\\n]|\\.)*\")")
 # "Admin-Passwort: x", "password = x", YAML "  secret_key: x": Schlüssel aus bis zu drei Wörtern vor ':' oder '='
-_LINE_PAIR = re.compile(r"(?P<key>(?:[A-Za-z_][\w\-]*[ \t]+){0,2}[A-Za-z_][\w\-]*)(?P<sep>[ \t]*[:=][ \t]*)"
+# (?<!…): nur am Wortanfang beginnen – sonst wird jede Position einer langen Zeile ohne Trennzeichen (Base64,
+# minifiziertes JSON) neu durchsucht, quadratisch in der Zeilenlänge
+_LINE_PAIR = re.compile(r"(?P<key>(?<![\w\-])(?:[A-Za-z_][\w\-]*[ \t]+){0,2}[A-Za-z_][\w\-]*)(?P<sep>[ \t]*[:=][ \t]*)"
                         r"(?P<val>\S.*)$", re.M)
-_URL_CREDS = re.compile(r"(?P<key>\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:)(?P<val>[^@\s/]+)(?=@)", re.I)
+_URL_CREDS = re.compile(r"(?P<key>(?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]*://[^/\s:@]+:)(?P<val>[^@\s/]+)(?=@)", re.I)
 # FortiOS "set psksecret ENC …", Cisco "enable secret 5 …", "password 7 …", "snmp-server community …"
 _CLI_SET = re.compile(r"(?P<key>^[ \t]*set[ \t]+(?P<name>[\w\-]+)[ \t]+)(?P<val>\S.*)$", re.M)
 _CLI_TYPED = re.compile(r"(?P<key>\b(?:password|secret|key-string)[ \t]+[05789][ \t]+)(?P<val>\S+)", re.I)

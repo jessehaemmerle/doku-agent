@@ -194,6 +194,12 @@ def reject_proposal(ctx: Context, pid: int, ignore: bool = False) -> None:
     # und ein zweites Mal ausführen
     if not ctx.store.transition_proposal(pid, ("pending", "failed", "rejected"), "rejected",
                                          "Abgelehnt" + (" und dauerhaft ignoriert" if ignore else "")):
+        current = ctx.store.get_proposal(pid)
+        if current is None:
+            raise ApplyError(f"Vorschlag {pid} nicht gefunden")
+        if current.status == "applying":
+            raise ApplyError(f"Vorschlag {pid} wird gerade übernommen – bei einem Abbruch lässt er sich nach zehn "
+                             "Minuten wieder öffnen")
         raise ApplyError(f"Vorschlag {pid} ist bereits übernommen und kann nicht mehr abgelehnt werden")
     if ignore and prop.dedup_key:
         ctx.store.ignore(prop.dedup_key, f"Vorschlag #{pid} abgelehnt: {prop.title}")
