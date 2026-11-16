@@ -38,7 +38,7 @@ FINDING_BLOCKS = ("audit", "findings", "pruefung", "cov-")
 SKIP_SUFFIXES = ("-summary", "-overview", "-assessment", "-description", "-beschreibung", "-bewertung",
                  "-zusammenfassung")
 _SEPARATOR = re.compile(r"^\|(\s*:?-{3,}:?\s*\|)+$")
-_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")  # Linktext behalten, Ziel verwerfen (Pfade ändern sich)
+_LINK = re.compile(r"\[([^\[\]]*)\]\([^)]*\)")  # Linktext behalten, Ziel verwerfen (Pfade ändern sich)
 
 
 def _area(stable_id: str) -> str:

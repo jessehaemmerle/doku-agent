@@ -49,7 +49,7 @@ _UNIT = re.compile(r"^(\d+(?:[.,]\d+)?)(gb|mb|tb|kb|gib|mib|ghz|mhz|ms|s|h|min|b
 _DE_DATE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:t[\d:.]+z?)?$")
 _NAME_NUMBER = re.compile(r"^[a-zäöüß]+(?:[-_][a-zäöüß]+)*[-_]\d+$")
-_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.M)
+_BULLET = re.compile(r"^[ \t]*(?:[-*•]|\d+[.)])[ \t]+", re.M)
 
 
 def _num(value: str) -> str:
@@ -265,7 +265,7 @@ def assessment(ctx: Context, key: str, *, expert: str, subject: str,
              "und nenne, was geprüft wurde.")
 
 
-_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_LINK = re.compile(r"\[([^\[\]]*)\]\([^)]*\)")
 _MARKER = re.compile(r"<!-- doku-agent:(?:begin|end) [^>]*-->")
 
 

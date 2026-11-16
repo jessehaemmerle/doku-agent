@@ -479,3 +479,20 @@ def test_reject_while_applying_names_the_state(ctx):
         reject_proposal(ctx, pid)
     with pytest.raises(ApplyError, match="nicht gefunden"):
         reject_proposal(ctx, 9999)
+
+
+def test_markdown_patterns_stay_fast_on_degenerate_lines():
+    """Muster für Links und Aufzählungen dürfen bei entarteten Zeilen (viele '[' oder '](' ohne Abschluss, viele
+    Leerzeilen) nicht quadratisch laufen – Wiki-Seiten und Modellantworten sind nicht vorhersehbar."""
+    import time
+    from doku_agent import changes, markdown
+    from doku_agent.generators import narrative
+    cases = [(changes._LINK, "[" * 200_000), (narrative._LINK, "[" * 200_000), (narrative._BULLET, "\n" * 200_000),
+             (markdown._INLINE_LINK, "[a](" * 50_000)]
+    for pattern, text in cases:
+        start = time.monotonic()
+        pattern.sub("", text)
+        assert time.monotonic() - start < 5, pattern.pattern
+    assert changes._LINK.sub(r"\1", "| [srv1](/it/srv1) | x |") == "| srv1 | x |"
+    assert len(narrative._BULLET.findall("- a\n\n  * b\n3. c\ntext")) == 3
+    assert markdown.replace_links("siehe [a](/alt) und [b](/x)", {"/alt": "/neu"}) == "siehe [a](/neu) und [b](/x)"

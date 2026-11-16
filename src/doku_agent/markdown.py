@@ -214,7 +214,7 @@ def code_block(text: str, lang: str = "") -> str:
 
 # --- Links (für Korrekturvorschläge des Wiki-Lint) -------------------------------
 
-_INLINE_LINK = re.compile(r"(\]\(\s*<?)([^)\s>]+)(>?(?:\s+\"[^\"]*\")?\s*\))")
+_INLINE_LINK = re.compile(r"(\]\(\s*<?)([^()\s>]+)(>?(?:\s+\"[^\"]*\")?\s*\))")
 _REF_LINK = re.compile(r"^(\s*\[[^\]]+\]:\s*<?)(\S+?)(>?(?:\s+.*)?)$")
 _MARKER_LINE = re.compile(r"<!--\s*doku-agent:(begin|end)\s+")
 
